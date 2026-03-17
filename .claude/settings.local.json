@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(streamlit run frontend/app.py)",
+      "Bash(source venv/Scripts/activate)",
+      "Bash(python -m streamlit run frontend/app.py)",
+      "Bash(netstat -ano)",
+      "Bash(python -m streamlit run frontend/app.py --server.headless true)",
+      "WebSearch"
+    ]
+  }
+}
