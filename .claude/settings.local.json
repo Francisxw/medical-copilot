@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(streamlit run frontend/app.py)",
+      "Bash(source venv/Scripts/activate)",
+      "Bash(python -m streamlit run frontend/app.py)",
+      "Bash(netstat -ano)",
+      "Bash(python -m streamlit run frontend/app.py --server.headless true)",
+      "WebSearch",
+      "mcp__web-reader__webReader",
+      "Bash(findstr :8080)",
+      "Bash(findstr :8081)",
+      "Bash(python -m uvicorn src.main:app --host 0.0.0.0 --port 8081 --reload)",
+      "Bash(timeout /t 3)",
+      "Bash(set API_URL=http://localhost:8081)",
+      "Bash(streamlit run:*)",
+      "Bash(cmd /c \"set API_URL=http://localhost:8081 && streamlit run frontend/app.py --server.port 8501\")",
+      "Bash(findstr :8501)",
+      "Bash(python -c \"import os; os.environ[''API_URL'']=''http://localhost:8081''; import streamlit; streamlit.run\\(''app.py'', ''--server.port=8501''\\)\")",
+      "Bash(ping 127.0.0.1 -n 3)",
+      "Bash(ping 127.0.0.1 -n 4)",
+      "Bash(findstr :8502)",
+      "Bash(findstr \":8081\\\\|:8502\")",
+      "Bash(findstr 8081)",
+      "Bash(findstr 8502)",
+      "Bash(taskkill /F /PID 32056)",
+      "Bash(taskkill /F /PID 16644)",
+      "Bash(taskkill //F //PID 32056)",
+      "Bash(taskkill //F //PID 16644)",
+      "Bash(curl -s http://localhost:8081/health)"
+    ]
+  }
+}

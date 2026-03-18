@@ -1,0 +1,6 @@
+- Used Streamlit native  to mimic the 3-column layout while keeping elements inside them.
+- Replaced default Streamlit headers with fixed custom CSS navigation bars.
+- Retained all backend API definitions, ensuring variables like  and  are strictly preserved.
+- Used Streamlit native `st.columns` to mimic the 3-column layout while keeping elements inside them.
+- Replaced default Streamlit headers with fixed custom CSS navigation bars.
+- Retained all backend API definitions, ensuring variables like `st.session_state.conversation` and `api_connected` are strictly preserved.
