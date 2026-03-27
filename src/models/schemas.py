@@ -29,9 +29,7 @@ class ConversationTurn(BaseModel):
 class GenerateEMRRequest(BaseModel):
     """生成病历请求"""
 
-    conversation: List[ConversationTurn] = Field(
-        ..., min_length=1, description="医患对话历史"
-    )
+    conversation: List[ConversationTurn] = Field(..., min_length=1, description="医患对话历史")
     patient_info: PatientInfoRequest = Field(..., description="患者信息")
 
     class Config:
@@ -93,15 +91,49 @@ class AudioTranscriptionResponse(BaseModel):
     text: str = Field(..., description="识别出的文本")
 
 
-# ==================== 通用响应 ====================
+class RAGUploadResponse(BaseModel):
+    """RAG文档上传响应。"""
 
+    status: str = Field(..., description="处理状态")
+    filename: str = Field(..., description="清理后的文件名")
+    chunks: int = Field(..., description="文档分块数量")
+    collection_name: str = Field(..., description="目标向量集合名称")
+
+
+class RAGVersionedUploadResponse(BaseModel):
+    """RAG版本化文档上传响应。"""
+
+    document_id: str = Field(..., description="文档ID")
+    version_id: str = Field(..., description="版本ID")
+    filename: str = Field(..., description="原始文件名")
+    chunks: int = Field(..., description="文档分块数量")
+    collection_name: str = Field(..., description="目标向量集合名称")
+    dedup_hit: bool = Field(..., description="是否命中去重")
+    message: str = Field(..., description="处理消息")
+
+
+# ==================== 通用响应 ====================
 
 class HealthResponse(BaseModel):
     """健康检查响应"""
 
-    status: str = Field(..., description="服务状态")
-    version: str = Field(..., description="版本号")
-    timestamp: datetime = Field(default_factory=datetime.now, description="时间戳")
+    status: str = Field(
+        ..., 
+        description="服务状态",
+        examples=["healthy"]
+    )
+    
+    version: str = Field(
+        ..., 
+        description="版本号",
+        examples=["1.0.0"]
+    )
+    
+    timestamp: datetime = Field(
+        default_factory=datetime.now, 
+        description="时间戳"
+    )
+
 
 
 class ErrorResponse(BaseModel):

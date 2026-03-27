@@ -1,25 +1,25 @@
 {
   "include": [
-    "D:/个人项目/medical-copilot/src",
-    "D:/个人项目/medical-copilot/frontend",
-    "D:/个人项目/medical-copilot/tests"
+    "D:/个人项目/医疗agent/medical-copilot/src",
+    "D:/个人项目/医疗agent/medical-copilot/frontend",
+    "D:/个人项目/医疗agent/medical-copilot/tests"
   ],
   "extraPaths": [
-    "D:/个人项目/medical-copilot",
-    "D:/个人项目/medical-copilot/src",
-    "D:/个人项目/medical-copilot/venv/Lib/site-packages"
+    "D:/个人项目/医疗agent/medical-copilot",
+    "D:/个人项目/医疗agent/medical-copilot/src",
+    "D:/个人项目/医疗agent/medical-copilot/venv/Lib/site-packages"
   ],
   "executionEnvironments": [
     {
-      "root": "D:/个人项目/medical-copilot",
+      "root": "D:/个人项目/医疗agent/medical-copilot",
       "extraPaths": [
-        "D:/个人项目/medical-copilot",
-        "D:/个人项目/medical-copilot/src",
-        "D:/个人项目/medical-copilot/venv/Lib/site-packages"
+        "D:/个人项目/医疗agent/medical-copilot",
+        "D:/个人项目/医疗agent/medical-copilot/src",
+        "D:/个人项目/医疗agent/medical-copilot/venv/Lib/site-packages"
       ]
     }
   ],
-  "venvPath": "D:/个人项目/medical-copilot",
+  "venvPath": "D:/个人项目/医疗agent/medical-copilot",
   "venv": "venv",
   "pythonVersion": "3.12"
 }

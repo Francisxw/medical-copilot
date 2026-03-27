@@ -49,6 +49,9 @@ data/guidelines/*.pdf
 logs/
 *.log
 
+# Storage (索引文件)
+storage/
+
 # OS
 .DS_Store
 Thumbs.db
@@ -60,6 +63,12 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Ruff
+.ruff_cache/
+
+# Sisyphus
+.sisyphus/
 
 # Jupyter
 .ipynb_checkpoints/

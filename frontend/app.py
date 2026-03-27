@@ -3,11 +3,12 @@ Streamlit演示UI - 医疗大模型Copilot重构版
 匹配视觉设计图（深蓝顶栏、卡片布局、SOAP分区、进度条等），全中文文案。
 """
 
-import streamlit as st
-import requests
 import json
 import os
 from datetime import datetime
+
+import requests
+import streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -23,6 +24,7 @@ st.set_page_config(
 API_URL = os.getenv("API_URL", "http://localhost:8888")
 
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "120"))  # 默认 120 秒
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 # ----------------- 自定义CSS注入 -----------------
 css = """
@@ -405,6 +407,45 @@ def init_session_state():
         st.session_state.voice_transcript_error = ""
     if "voice_transcript_success" not in st.session_state:
         st.session_state.voice_transcript_success = ""
+    if "rag_uploading" not in st.session_state:
+        st.session_state.rag_uploading = False
+
+
+def extract_error_detail(response: requests.Response) -> str:
+    """Extract a user-facing error detail from an API response."""
+
+    try:
+        detail = response.json().get("detail")
+    except ValueError:
+        detail = None
+    return str(detail or "请求失败")
+
+
+def post_json(path: str, payload: dict) -> requests.Response:
+    """Send a JSON request to the backend API."""
+
+    return requests.post(f"{API_URL}{path}", json=payload, timeout=REQUEST_TIMEOUT)
+
+
+def post_file(
+    path: str,
+    field_name: str,
+    file_obj,
+    *,
+    default_name: str,
+    default_content_type: str,
+) -> requests.Response:
+    """Send a file upload request to the backend API."""
+
+    if hasattr(file_obj, "seek"):
+        file_obj.seek(0)
+    filename = getattr(file_obj, "name", None) or default_name
+    content_type = getattr(file_obj, "type", None) or default_content_type
+    return requests.post(
+        f"{API_URL}{path}",
+        files={field_name: (filename, file_obj, content_type)},
+        timeout=REQUEST_TIMEOUT,
+    )
 
 
 def transcribe_patient_audio(audio_file) -> None:
@@ -414,35 +455,25 @@ def transcribe_patient_audio(audio_file) -> None:
     st.session_state.voice_transcript_status = "正在调用语音识别服务..."
 
     try:
-        audio_bytes = audio_file.getvalue()
-        response = requests.post(
-            f"{API_URL}/api/transcribe-audio",
-            files={
-                "audio": (
-                    audio_file.name or "patient_recording.wav",
-                    audio_bytes,
-                    audio_file.type or "audio/wav",
-                )
-            },
-            timeout=REQUEST_TIMEOUT,
+        response = post_file(
+            "/api/transcribe-audio",
+            "audio",
+            audio_file,
+            default_name="patient_recording.wav",
+            default_content_type="audio/wav",
         )
 
         if response.status_code == 200:
             transcript_text = response.json().get("text", "").strip()
             st.session_state.patient_input_buffer = transcript_text
-            st.session_state.voice_transcript_success = (
-                "✅ 转写完成，可先编辑再发送患者发言。"
-            )
+            st.session_state.voice_transcript_success = "✅ 转写完成，可先编辑再发送患者发言。"
             st.session_state.voice_transcript_status = ""
         else:
-            detail = response.text
-            try:
-                detail = response.json().get("detail", response.text)
-            except ValueError:
-                pass
-            st.session_state.voice_transcript_error = f"❌ 转写失败：{detail}"
+            st.session_state.voice_transcript_error = (
+                f"❌ 转写失败：{extract_error_detail(response)}"
+            )
             st.session_state.voice_transcript_status = ""
-    except Exception as exc:
+    except requests.RequestException as exc:
         st.session_state.voice_transcript_error = f"❌ 转写请求异常：{str(exc)}"
         st.session_state.voice_transcript_status = ""
 
@@ -452,7 +483,7 @@ def check_api_connection() -> bool:
     try:
         response = requests.get(f"{API_URL}/health", timeout=2)
         return response.status_code == 200
-    except:
+    except requests.RequestException:
         return False
 
 
@@ -464,7 +495,7 @@ def main():
         st.session_state.api_connected = check_api_connection()
         if not st.session_state.api_connected:
             st.error("❌ 无法连接到API服务！请确保后端服务已启动。")
-            st.info("执行: `uvicorn src.main:app --reload --host 0.0.0.0 --port 8000`")
+            st.info("执行: `uvicorn src.main:app --reload --host 0.0.0.0 --port 8888`")
             return
 
     # 主体布局，三列式卡片排布
@@ -476,9 +507,7 @@ def main():
     with col1:
         # 卡片 1: 患者基本信息
         with st.container():
-            st.markdown(
-                '<div class="card-header">👤 患者档案</div>', unsafe_allow_html=True
-            )
+            st.markdown('<div class="card-header">👤 患者档案</div>', unsafe_allow_html=True)
 
             c_age, c_gender = st.columns(2)
             with c_age:
@@ -527,17 +556,13 @@ def main():
                     role_class = turn["role"]
                     avatar = "👨‍⚕️" if role_class == "doctor" else "👤"
                     role_name = "医生" if role_class == "doctor" else "患者"
-                    bubble_class = (
-                        "chat-doctor" if role_class == "doctor" else "chat-patient"
-                    )
+                    bubble_class = "chat-doctor" if role_class == "doctor" else "chat-patient"
 
                     chat_lines.append(f'<div class="chat-message {role_class}">')
                     chat_lines.append(f'<div class="chat-avatar">{avatar}</div>')
                     chat_lines.append('<div class="chat-content">')
                     chat_lines.append(f'<div class="chat-role">{role_name}</div>')
-                    chat_lines.append(
-                        f'<div class="chat-bubble {bubble_class}">{content}</div>'
-                    )
+                    chat_lines.append(f'<div class="chat-bubble {bubble_class}">{content}</div>')
                     chat_lines.append("</div>")  # close chat-content
                     chat_lines.append("</div>")  # close chat-message
 
@@ -589,9 +614,7 @@ def main():
             with voice_action_col1:
                 if st.button("转写本段录音", use_container_width=True):
                     if audio_value is None:
-                        st.session_state.voice_transcript_error = (
-                            "⚠️ 请先录制一段患者语音。"
-                        )
+                        st.session_state.voice_transcript_error = "⚠️ 请先录制一段患者语音。"
                         st.session_state.voice_transcript_success = ""
                         st.session_state.voice_transcript_status = ""
                     else:
@@ -600,9 +623,7 @@ def main():
                 if audio_value is not None:
                     st.caption("录音已就绪，点击左侧按钮即可转写并回填到患者输入框。")
                 else:
-                    st.caption(
-                        "支持 16kHz WAV 录音，适合作为当前核心版的语音录入方式。"
-                    )
+                    st.caption("支持 16kHz WAV 录音，适合作为当前核心版的语音录入方式。")
 
             if st.session_state.voice_transcript_status:
                 st.info(st.session_state.voice_transcript_status)
@@ -615,9 +636,7 @@ def main():
             input_col1, input_col2 = st.columns([3, 1])
 
             with input_col1:
-                doc_input = st.text_input(
-                    "医生", placeholder="输入医生的话...", key="doctor_input"
-                )
+                doc_input = st.text_input("医生", placeholder="输入医生的话...", key="doctor_input")
                 pat_input = st.text_area(
                     "患者",
                     placeholder="输入患者的话，或先使用上方语音转写...",
@@ -661,35 +680,25 @@ def main():
             if st.session_state.emr_result:
                 st.success("✅ 已基于最新对话生成分析。")
                 st.markdown("**系统提取的关键症状：**")
-                st.markdown(
-                    "- 咳嗽 (1周)\n- 发热 (38℃)\n- 白痰 (少量)\n- 胸闷气短 (轻微)"
-                )
+                st.markdown("- 咳嗽 (1周)\n- 发热 (38℃)\n- 白痰 (少量)\n- 胸闷气短 (轻微)")
                 st.info(
                     "💡 **系统建议**：建议重点排查下呼吸道感染，推荐血常规及胸片检查。注意询问流行病学史。"
                 )
             elif st.session_state.conversation:
-                st.info(
-                    "⏳ AI正在监听对话，点击下方「生成智能病历」以启动完整分析流程。"
-                )
+                st.info("⏳ AI正在监听对话，点击下方「生成智能病历」以启动完整分析流程。")
             else:
                 st.write("等待信息输入...")
 
         # 卡片 4: 核心触发区
         with st.container():
-            st.markdown(
-                '<div class="card-header">⚡ 生成控制台</div>', unsafe_allow_html=True
-            )
+            st.markdown('<div class="card-header">⚡ 生成控制台</div>', unsafe_allow_html=True)
 
             st.write("当收集到足够信息后，可请求AI生成符合规范的结构化病历并进行质控。")
-            if st.button(
-                "🚀 生成智能病历 (SOAP)", use_container_width=True, type="primary"
-            ):
+            if st.button("🚀 生成智能病历 (SOAP)", use_container_width=True, type="primary"):
                 if not st.session_state.conversation:
                     st.warning("⚠️ 请先在左侧输入对话！")
                 else:
-                    with st.spinner(
-                        "🔄 AI多智能体正在处理 (提取 -> 检索 -> 生成 -> 质控)..."
-                    ):
+                    with st.spinner("🔄 AI多智能体正在处理 (提取 -> 检索 -> 生成 -> 质控)..."):
                         try:
                             req_data = {
                                 "conversation": st.session_state.conversation,
@@ -698,22 +707,63 @@ def main():
                                     "gender": st.session_state.patient_gender,
                                 },
                             }
-                            resp = requests.post(
-                                f"{API_URL}/api/generate-emr",
-                                json=req_data,
-                                timeout=REQUEST_TIMEOUT,
-                            )
+                            resp = post_json("/api/generate-emr", req_data)
                             if resp.status_code == 200:
                                 st.session_state.emr_result = resp.json()
                             else:
-                                st.error(f"❌ 生成失败: {resp.text}")
-                        except Exception as e:
+                                st.error(f"❌ 生成失败: {extract_error_detail(resp)}")
+                        except requests.RequestException as e:
                             st.error(f"❌ 请求失败: {str(e)}")
 
     # ==========================
     # 列 3：质控报告 + SOAP结果
     # ==========================
     with col3:
+        # 卡片 4.5: RAG 文档上传
+        with st.container():
+            st.markdown(
+                '<div class="card-header">📄 加载 RAG 文档</div>',
+                unsafe_allow_html=True,
+            )
+            rag_file = st.file_uploader(
+                "上传 JSON / PDF / TXT 文件",
+                type=["json", "pdf", "txt"],
+                key="rag_uploader",
+            )
+            if rag_file is not None:
+                if st.button(
+                    "加载到知识库",
+                    key="rag_upload_btn",
+                    disabled=st.session_state.rag_uploading,
+                ):
+                    with st.spinner("正在上传并索引文档…"):
+                        st.session_state.rag_uploading = True
+                        try:
+                            file_size = rag_file.getbuffer().nbytes
+                            if file_size > MAX_UPLOAD_BYTES:
+                                st.error("❌ 上传失败：文件大小超过 10MB 限制")
+                                return
+
+                            resp = post_file(
+                                "/api/rag/upload",
+                                "file",
+                                rag_file,
+                                default_name=rag_file.name,
+                                default_content_type="application/octet-stream",
+                            )
+                            if resp.status_code == 200:
+                                result = resp.json()
+                                st.success(
+                                    f"✅ 已加载 **{result.get('filename', rag_file.name)}**，"
+                                    f"共 {result.get('chunks', '?')} 个片段"
+                                )
+                            else:
+                                st.error(f"❌ 上传失败: {extract_error_detail(resp)}")
+                        except requests.RequestException as e:
+                            st.error(f"❌ 请求失败: {str(e)}")
+                        finally:
+                            st.session_state.rag_uploading = False
+
         emr_data = st.session_state.emr_result or {}
         qa_report = emr_data.get("qa_report", {})
         final_emr = emr_data.get("final_emr", {})
@@ -721,17 +771,13 @@ def main():
 
         # 卡片 5: 质量检查
         with st.container():
-            st.markdown(
-                '<div class="card-header">🛡️ 病历质量检查</div>', unsafe_allow_html=True
-            )
+            st.markdown('<div class="card-header">🛡️ 病历质量检查</div>', unsafe_allow_html=True)
 
             if not st.session_state.emr_result:
                 st.write("（尚未生成报告）")
             else:
                 score_color = (
-                    "#4CAF50"
-                    if score >= 85
-                    else ("#FF9800" if score >= 60 else "#F44336")
+                    "#4CAF50" if score >= 85 else ("#FF9800" if score >= 60 else "#F44336")
                 )
                 is_complete = qa_report.get("is_complete", False)
                 status_text = "通过" if is_complete else "存在缺项"
@@ -801,9 +847,7 @@ def main():
                     unsafe_allow_html=True,
                 )
                 st.markdown(
-                    render_soap_box(
-                        "O", "客观资料 (Objective)", final_emr.get("objective", "无")
-                    ),
+                    render_soap_box("O", "客观资料 (Objective)", final_emr.get("objective", "无")),
                     unsafe_allow_html=True,
                 )
                 st.markdown(
@@ -813,9 +857,7 @@ def main():
                     unsafe_allow_html=True,
                 )
                 st.markdown(
-                    render_soap_box(
-                        "P", "诊疗计划 (Plan)", final_emr.get("plan", "无")
-                    ),
+                    render_soap_box("P", "诊疗计划 (Plan)", final_emr.get("plan", "无")),
                     unsafe_allow_html=True,
                 )
 
@@ -833,9 +875,7 @@ def main():
                         use_container_width=True,
                     )
                 with dl_col2:
-                    if st.button(
-                        "✅ 确认并归档", use_container_width=True, type="primary"
-                    ):
+                    if st.button("✅ 确认并归档", use_container_width=True, type="primary"):
                         st.toast("病历已成功归档入库！", icon="✅")
 
 

@@ -3,7 +3,8 @@ FastAPI路由定义
 依赖注入方式获取工作流实例
 """
 
-from fastapi import APIRouter, HTTPException, Depends, File, UploadFile
+from fastapi import APIRouter, HTTPException, Depends, File, UploadFile, Header, Query
+from fastapi.concurrency import run_in_threadpool
 from loguru import logger
 from typing import TYPE_CHECKING, Annotated
 
@@ -12,14 +13,21 @@ from src.models.schemas import (
     GenerateEMRRequest,
     GenerateEMRResponse,
     HealthResponse,
+    RAGUploadResponse,
+    RAGVersionedUploadResponse,
 )
 from src.graph.workflow import MedicalCopilotWorkflow
 from src.services.asr_service import ASRService, ASRServiceError
+from src.services.rag_service import RAGService, RAGServiceError
+from src.rag.service import VersionedTenantRAGService, DedupMode, RAGCoreServiceError
 
 # 使用 TYPE_CHECKING 避免循环导入
 if TYPE_CHECKING:
     from src.config import Settings
 
+# Backward compatibility scope for the legacy route.
+LEGACY_DEFAULT_SCOPE = "user-uploads"
+LEGACY_DEFAULT_COLLECTION_NAME = LEGACY_DEFAULT_SCOPE
 
 # 创建路由器
 router = APIRouter()
@@ -27,6 +35,7 @@ router = APIRouter()
 # 存储工作流实例的容器（通过依赖注入访问）
 _workflow_instance: "MedicalCopilotWorkflow | None" = None
 _asr_service_instance: ASRService | None = None
+_rag_service_instance: RAGService | None = None
 
 
 def set_workflow_instance(workflow: "MedicalCopilotWorkflow") -> None:
@@ -50,6 +59,25 @@ def get_asr_service() -> ASRService:
         _asr_service_instance = ASRService()
 
     return _asr_service_instance
+
+
+def get_rag_service() -> RAGService:
+    """获取RAG服务实例。"""
+    global _rag_service_instance
+    if _rag_service_instance is None:
+        _rag_service_instance = RAGService()
+    return _rag_service_instance
+
+
+_versioned_rag_service_instance: VersionedTenantRAGService | None = None
+
+
+def get_versioned_rag_service() -> VersionedTenantRAGService:
+    """获取版本化多租户RAG服务实例。"""
+    global _versioned_rag_service_instance
+    if _versioned_rag_service_instance is None:
+        _versioned_rag_service_instance = VersionedTenantRAGService()
+    return _versioned_rag_service_instance
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -85,8 +113,7 @@ async def generate_emr(
         # 转换请求数据为工作流输入格式
         inputs = {
             "conversation": [
-                {"role": turn.role, "content": turn.content}
-                for turn in request.conversation
+                {"role": turn.role, "content": turn.content} for turn in request.conversation
             ],
             "patient_info": request.patient_info.model_dump(),
         }
@@ -120,14 +147,17 @@ async def generate_emr(
 
 
 @router.post("/api/transcribe-audio", response_model=AudioTranscriptionResponse)
-async def transcribe_audio(audio: UploadFile = File(...)):
+async def transcribe_audio(
+    asr_service: Annotated[ASRService, Depends(get_asr_service)],  # 注入的 ASR 服务
+    audio: UploadFile = File(...),  # 上传的音频文件
+):
     """将上传的音频转写为文本。"""
     try:
         audio_bytes = await audio.read()
         if not audio_bytes:
             raise HTTPException(status_code=400, detail="上传的音频为空")
 
-        transcript = await get_asr_service().transcribe_audio(
+        transcript = await asr_service.transcribe_audio(
             audio_bytes=audio_bytes,
             mime_type=audio.content_type or "application/octet-stream",
             filename=audio.filename or "audio.wav",
@@ -162,3 +192,94 @@ async def workflow_info(
         "max_iterations": 3,
         "retrieval_mode": workflow.retrieval_mode,
     }
+
+
+@router.post("/api/rag/upload", response_model=RAGUploadResponse)
+async def upload_rag_document(file: UploadFile = File(...)):
+    """
+    上传单个文档并索引到 RAG 向量存储。
+
+    使用线程池执行同步的索引操作，避免阻塞事件循环。
+    """
+    try:
+        file_bytes = await file.read()
+        if not file_bytes:
+            raise HTTPException(status_code=400, detail="上传的文件为空")
+
+        collection_name = LEGACY_DEFAULT_SCOPE
+
+        # 在线程池中执行同步的索引操作
+        result = await run_in_threadpool(
+            get_rag_service().upload_and_index,
+            file_bytes=file_bytes,
+            filename=file.filename or "document",
+            collection_name=collection_name,
+        )
+
+        return RAGUploadResponse(
+            status="success",
+            filename=result["filename"],
+            chunks=result["chunks"],
+            collection_name=result["collection_name"],
+        )
+
+    except HTTPException:
+        raise
+    except RAGServiceError as exc:
+        # 用户输入错误 -> 400
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        # 后端处理错误 -> 500，但不暴露原始异常细节
+        logger.error(f"RAG 上传索引失败: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail="文档索引失败，请稍后重试") from exc
+
+
+@router.post("/api/rag/upload-versioned", response_model=RAGVersionedUploadResponse)
+async def upload_rag_document_versioned(
+    file: UploadFile = File(...),
+    x_tenant_id: str = Header(..., alias="X-Tenant-ID"),
+    x_kb_id: str = Header(..., alias="X-KB-ID"),
+    dedup_mode: DedupMode = Query(
+        DedupMode.SKIP, description="去重模式: skip, new_version, replace"
+    ),
+):
+    """
+    上传单个文档并索引到版本化多租户 RAG 向量存储。
+
+    使用线程池执行同步的索引操作，避免阻塞事件循环。
+    支持租户隔离和文档版本控制。
+    """
+    try:
+        file_bytes = await file.read()
+        if not file_bytes:
+            raise HTTPException(status_code=400, detail="上传的文件为空")
+
+        # 在线程池中执行同步的索引操作
+        result = await run_in_threadpool(
+            get_versioned_rag_service().upload_and_index,
+            file_bytes=file_bytes,
+            filename=file.filename or "document",
+            tenant_id=x_tenant_id,
+            kb_id=x_kb_id,
+            dedup_mode=dedup_mode,
+        )
+
+        return RAGVersionedUploadResponse(
+            document_id=result.document_id,
+            version_id=result.version_id,
+            filename=result.filename,
+            chunks=result.chunks,
+            collection_name=result.collection_name,
+            dedup_hit=result.dedup_hit,
+            message=result.message,
+        )
+
+    except HTTPException:
+        raise
+    except RAGCoreServiceError as exc:
+        # 用户输入错误 -> 400
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        # 后端处理错误 -> 500，但不暴露原始异常细节
+        logger.error(f"RAG 版本化上传索引失败: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail="文档索引失败，请稍后重试") from exc

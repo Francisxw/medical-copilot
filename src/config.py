@@ -144,7 +144,7 @@ class AppConfig(BaseSettings):
 
 # ==================== 统一配置类 ====================
 
-
+#分散的配置类，统一到一个 Settings 门面对象中
 class Settings:
     """
     统一配置入口
