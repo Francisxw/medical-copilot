@@ -92,12 +92,22 @@ class APIConfig(BaseSettings):
     # Frontend URL (用于 CORS)
     frontend_url: str = "http://localhost:8501"
 
+    # CORS allowed origins (comma-separated).
+    # Defaults to frontend_url when not explicitly set.
+    # Use "*" only in development; credentials will be disabled automatically.
+    cors_origins: Optional[str] = None
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
     )
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        if not self.cors_origins:
+            self.cors_origins = self.frontend_url
 
 
 class ASRConfig(BaseSettings):
@@ -144,7 +154,8 @@ class AppConfig(BaseSettings):
 
 # ==================== 统一配置类 ====================
 
-#分散的配置类，统一到一个 Settings 门面对象中
+
+# 分散的配置类，统一到一个 Settings 门面对象中
 class Settings:
     """
     统一配置入口
@@ -182,6 +193,7 @@ class Settings:
         self.api_port = self.api.api_port
         self.api_reload = self.api.api_reload
         self.request_timeout = self.api.request_timeout
+        self.cors_origins = self.api.cors_origins
 
         self.asr_api_key = self.asr.asr_api_key
         self.asr_region = self.asr.asr_region
@@ -210,19 +222,34 @@ class Settings:
         """
         warnings = []
 
-        # 检查 API key
-        if not self.openai_api_key or self.openai_api_key == "your-api-key-here":
+        # 检查 API key — conservative: warn but don't block.
+        # OPENAI_BASE_URL may target compatible providers, so we only
+        # flag obvious placeholders, malformed whitespace, and suspiciously
+        # short keys. OpenAI-specific heuristics are gated by the base URL.
+        api_key = self.openai_api_key.strip()
+        if not api_key or api_key == "your-api-key-here":
             warnings.append("⚠️ OPENAI_API_KEY 未设置或为默认值")
+        else:
+            if api_key != self.openai_api_key:
+                warnings.append("⚠️ OPENAI_API_KEY 包含首尾空白字符，请检查配置")
+            if len(api_key) < 20:
+                warnings.append("⚠️ OPENAI_API_KEY 格式异常（长度不足）")
+            if (
+                "api.openai.com" in self.openai_base_url
+                and api_key.startswith("sk-")
+                and len(api_key) < 40
+            ):
+                warnings.append("⚠️ OPENAI_API_KEY 格式异常（OpenAI key 长度不足）")
 
         if not self.asr_api_key:
-            warnings.append(
-                "⚠️ ASR_API_KEY / DASHSCOPE_API_KEY 未设置，语音识别功能将不可用"
-            )
+            warnings.append("⚠️ ASR_API_KEY / DASHSCOPE_API_KEY 未设置，语音识别功能将不可用")
+
+        # Validate retrieval mode against known values
+        valid_modes = {"simple", "vector", "llamagraph", "llamaindex"}
+        if self.retrieval_mode.lower() not in valid_modes:
+            warnings.append(f"⚠️ 未知的检索模式 '{self.retrieval_mode}'，有效值: {valid_modes}")
 
         # 检查目录是否存在
-        project_root = Path(".").resolve()
-
-        # 检查数据目录
         guidelines_path = Path(self.guidelines_path)
         if not guidelines_path.exists():
             warnings.append(f"⚠️ 指南文件不存在: {guidelines_path}")

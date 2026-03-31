@@ -4,15 +4,25 @@ FastAPI应用主入口
 """
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from loguru import logger
 import sys
 import os
 
 from src.config import settings, validate_settings
-from src.api.routes import router, set_workflow_instance
+from src.api.routes import router
 from src.graph.workflow import MedicalCopilotWorkflow
+from src.services.asr_service import ASRService
+from src.services.rag_service import RAGService
+from src.rag.service import VersionedTenantRAGService
+from src.exceptions import RetrievalError, GenerationError
+
+
+def _parse_cors_origins(raw: str) -> list[str]:
+    """Parse comma-separated CORS origins, stripping whitespace."""
+    return [o.strip() for o in raw.split(",") if o.strip()]
 
 
 @asynccontextmanager
@@ -31,14 +41,18 @@ async def lifespan(app: FastAPI):
     logger.info(f"向量数据库: {settings.chroma_persist_dir}")
     logger.info(f"日志级别: {settings.log_level}")
 
-    # 初始化工作流实例
+    # Initialize services on app.state so route dependencies read from
+    # a single lifecycle-managed source instead of module-level globals.
     try:
-        workflow = MedicalCopilotWorkflow(retrieval_mode=settings.retrieval_mode)
-        set_workflow_instance(workflow)
+        app.state.workflow = MedicalCopilotWorkflow(retrieval_mode=settings.retrieval_mode)
         logger.info("✅ 工作流初始化完成")
     except Exception as e:
-        logger.error(f"❌ 工作流初始化失败: {str(e)}")
+        logger.error(f"❌ 工作流初始化失败: {e}")
         raise
+
+    app.state.asr_service = ASRService()
+    app.state.rag_service = RAGService()
+    app.state.versioned_rag_service = VersionedTenantRAGService()
 
     yield
 
@@ -59,9 +73,7 @@ log_dir = os.path.dirname(settings.log_file)
 if log_dir and not os.path.exists(log_dir):
     os.makedirs(log_dir, exist_ok=True)
 
-logger.add(
-    settings.log_file, rotation="500 MB", retention="10 days", level=settings.log_level
-)
+logger.add(settings.log_file, rotation="500 MB", retention="10 days", level=settings.log_level)
 
 # 创建FastAPI应用（使用 lifespan）
 app = FastAPI(
@@ -73,14 +85,64 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# 配置CORS
+# --- CORS -------------------------------------------------------------------
+# Derive origins from settings instead of hardcoding wildcard+credentials.
+# Per the CORS spec, allow_origins=["*"] with allow_credentials=True is
+# invalid; browsers will reject it.  When wildcard is desired (development),
+# credentials are automatically disabled.
+_cors_origins = _parse_cors_origins(settings.cors_origins or settings.frontend_url)
+if not _cors_origins:
+    _cors_origins = [settings.frontend_url]
+_allow_credentials = "*" not in _cors_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 生产环境应限制具体域名
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- Global exception handler -----------------------------------------------
+# Preserves the exception chain in logs while returning a sanitized response
+# so internal tracebacks never leak to callers.
+
+
+@app.exception_handler(RetrievalError)
+async def _retrieval_error_handler(request: Request, exc: RetrievalError):
+    logger.error(
+        f"RetrievalError on {request.method} {request.url.path}: {exc}",
+        exc_info=True,
+    )
+    return JSONResponse(
+        status_code=502,
+        content={"detail": "知识检索服务暂时不可用，请稍后重试"},
+    )
+
+
+@app.exception_handler(GenerationError)
+async def _generation_error_handler(request: Request, exc: GenerationError):
+    logger.error(
+        f"GenerationError on {request.method} {request.url.path}: {exc}",
+        exc_info=True,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "病历生成失败，请稍后重试"},
+    )
+
+
+@app.exception_handler(Exception)
+async def _global_exception_handler(request: Request, exc: Exception):
+    logger.error(
+        f"Unhandled exception on {request.method} {request.url.path}: {exc}",
+        exc_info=True,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "服务器内部错误，请稍后重试"},
+    )
+
 
 # 注册路由
 app.include_router(router)

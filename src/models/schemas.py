@@ -7,6 +7,8 @@ from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
+from .function_schemas import SOAPNote, QAIssue, QAReport
+
 
 # ==================== 请求模型 ====================
 
@@ -47,40 +49,14 @@ class GenerateEMRRequest(BaseModel):
 # ==================== 响应模型 ====================
 
 
-class SOAPNoteResponse(BaseModel):
-    """SOAP病历响应"""
-
-    subjective: str = Field(..., description="主诉/现病史")
-    objective: str = Field(..., description="客观检查")
-    assessment: str = Field(..., description="评估诊断")
-    plan: str = Field(..., description="诊疗计划")
-
-
-class QAIssueResponse(BaseModel):
-    """质控问题响应"""
-
-    type: str = Field(..., description="问题类型")
-    field: str = Field(..., description="相关字段")
-    message: str = Field(..., description="问题描述")
-    severity: str = Field(..., description="严重程度")
-
-
-class QAReportResponse(BaseModel):
-    """质控报告响应"""
-
-    is_complete: bool = Field(..., description="是否完整")
-    issues: List[QAIssueResponse] = Field(default_factory=list, description="问题列表")
-    score: float = Field(..., ge=0, le=100, description="质量评分")
-
-
 class GenerateEMRResponse(BaseModel):
     """生成病历响应"""
 
     session_id: str = Field(..., description="会话ID")
     timestamp: str = Field(..., description="生成时间")
     patient_info: PatientInfoRequest = Field(..., description="患者信息")
-    final_emr: Optional[SOAPNoteResponse] = Field(None, description="最终病历")
-    qa_report: Optional[QAReportResponse] = Field(None, description="质控报告")
+    final_emr: Optional[SOAPNote] = Field(None, description="最终病历")
+    qa_report: Optional[QAReport] = Field(None, description="质控报告")
     iteration_count: int = Field(..., description="迭代次数")
     error_message: Optional[str] = Field(None, description="错误信息")
 
@@ -114,26 +90,15 @@ class RAGVersionedUploadResponse(BaseModel):
 
 # ==================== 通用响应 ====================
 
+
 class HealthResponse(BaseModel):
     """健康检查响应"""
 
-    status: str = Field(
-        ..., 
-        description="服务状态",
-        examples=["healthy"]
-    )
-    
-    version: str = Field(
-        ..., 
-        description="版本号",
-        examples=["1.0.0"]
-    )
-    
-    timestamp: datetime = Field(
-        default_factory=datetime.now, 
-        description="时间戳"
-    )
+    status: str = Field(..., description="服务状态", examples=["healthy"])
 
+    version: str = Field(..., description="版本号", examples=["1.0.0"])
+
+    timestamp: datetime = Field(default_factory=datetime.now, description="时间戳")
 
 
 class ErrorResponse(BaseModel):

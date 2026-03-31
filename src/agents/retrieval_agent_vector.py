@@ -5,17 +5,19 @@
 
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
+from pydantic import SecretStr
 from typing import List, Dict, Any
 from loguru import logger
 import os
 from pathlib import Path
 
 from src.config import get_settings
+from src.retrieval import BaseRetrievalStrategy
 
 settings = get_settings()
 
 
-class VectorRetrievalAgent:
+class VectorRetrievalAgent(BaseRetrievalStrategy):
     """
     向量检索Agent - 基于 OpenRouter Embedding API
     """
@@ -24,7 +26,7 @@ class VectorRetrievalAgent:
         # 初始化 Embeddings（支持 OpenRouter / OpenAI）
         self.embeddings = OpenAIEmbeddings(
             model=settings.embedding_model,
-            api_key=settings.openai_api_key,
+            api_key=SecretStr(settings.openai_api_key),
             base_url=settings.embedding_base_url,
         )
         self.vectorstore = None
@@ -76,9 +78,7 @@ class VectorRetrievalAgent:
             logger.info(f"向量检索: {query[:50]}...")
 
             # 执行相似度搜索
-            results = self.vectorstore.similarity_search_with_score(
-                query=query, k=top_k
-            )
+            results = self.vectorstore.similarity_search_with_score(query=query, k=top_k)
 
             # 格式化结果（Chroma 返回的是距离，需要转换为相似度）
             guidelines = []

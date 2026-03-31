@@ -80,3 +80,14 @@ class RetrievalMode(str, Enum):
 
 
 from loguru import logger
+
+
+def get_simple_fallback_agent() -> BaseRetrievalStrategy:
+    """Create a :class:`SimpleRetrievalAgent` instance for fallback retrieval.
+
+    Centralised helper so callers don't duplicate the lazy-import +
+    instantiation pattern.
+    """
+    from src.agents.retrieval_agent_simple import SimpleRetrievalAgent
+
+    return SimpleRetrievalAgent()

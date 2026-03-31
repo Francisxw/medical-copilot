@@ -10,6 +10,7 @@ from loguru import logger
 from src.config import get_settings
 from src.models.function_schemas import MedicalInfoExtraction
 from src.utils.llm_adapter import StructuredOutputAdapter
+from src.exceptions import DialogueError
 
 settings = get_settings()
 
@@ -47,9 +48,7 @@ class DialogueAgent:
 
         如果对话中未提及某些信息，请返回空列表或null。"""
 
-    async def extract(
-        self, conversation: List[Dict[str, str]]
-    ) -> MedicalInfoExtraction:
+    async def extract(self, conversation: List[Dict[str, str]]) -> MedicalInfoExtraction:
         """
         从对话中提取医疗信息
 
@@ -81,7 +80,7 @@ class DialogueAgent:
             return result
         except Exception as e:
             logger.error(f"[FAIL] 医疗信息提取失败: {str(e)}")
-            raise
+            raise DialogueError(f"Failed to extract medical info: {e}") from e
 
     def _format_conversation(self, conversation: List[Dict[str, str]]) -> str:
         """格式化对话为文本"""
@@ -90,29 +89,3 @@ class DialogueAgent:
             role = "医生" if turn.get("role") == "doctor" else "患者"
             formatted.append(f"{role}: {turn.get('content', '')}")
         return "\n".join(formatted)
-
-
-# 测试代码
-if __name__ == "__main__":
-    import asyncio
-
-    async def test():
-        agent = DialogueAgent()
-        test_conversation = [
-            {"role": "doctor", "content": "你好，今天有什么不舒服？"},
-            {
-                "role": "patient",
-                "content": "我咳嗽已经一周了，还有点发热，体温38度左右。有点头疼，没有食欲。",
-            },
-        ]
-        result = await agent.extract(test_conversation)
-        print("\n提取结果：")
-        print(f"症状: {result.symptoms}")
-        print(f"病程: {result.duration}")
-        print(f"严重程度: {result.severity}")
-        print(f"用药记录: {result.medications}")
-        print(f"过敏史: {result.allergies}")
-        print(f"既往病史: {result.past_history}")
-        print(f"家族史: {result.family_history}")
-
-    asyncio.run(test())

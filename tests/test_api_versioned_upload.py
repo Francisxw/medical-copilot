@@ -3,10 +3,11 @@ Tests for the versioned RAG upload API endpoint.
 """
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 from fastapi.testclient import TestClient
 
 from src.main import app
+from src.api.routes import get_versioned_rag_service
 from src.rag.service import UploadIndexResult, DedupMode
 
 
@@ -29,8 +30,11 @@ def mock_versioned_service():
 @pytest.fixture
 def client_with_mock_service(mock_versioned_service):
     """Fixture providing a TestClient with mocked versioned service."""
-    with patch("src.api.routes.get_versioned_rag_service", return_value=mock_versioned_service):
+    app.dependency_overrides[get_versioned_rag_service] = lambda: mock_versioned_service
+    try:
         yield TestClient(app)
+    finally:
+        app.dependency_overrides.pop(get_versioned_rag_service, None)
 
 
 def test_versioned_upload_happy_path(client_with_mock_service, mock_versioned_service):

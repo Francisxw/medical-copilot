@@ -8,7 +8,14 @@ from typing import Dict, List
 from loguru import logger
 
 from src.config import get_settings
-from src.models.function_schemas import SOAPNote, QAReport, QAIssue
+from src.models.function_schemas import (
+    MedicalInfoExtraction,
+    QAIssue,
+    QAIssueSeverity,
+    QAIssueType,
+    QAReport,
+    SOAPNote,
+)
 from src.utils.llm_adapter import StructuredOutputAdapter
 
 settings = get_settings()
@@ -59,10 +66,7 @@ class QAAgent:
                 "field": "subjective",
                 "check": lambda emr, info: bool(
                     emr.subjective
-                    and any(
-                        symptom in emr.subjective
-                        for symptom in info.get("symptoms", [])
-                    )
+                    and any(symptom.lower() in emr.subjective.lower() for symptom in info.symptoms)
                 ),
                 "error_message": "主诉中未包含患者提及的主要症状",
             },
@@ -70,8 +74,7 @@ class QAAgent:
                 "name": "检查病程是否记录",
                 "field": "subjective",
                 "check": lambda emr, info: (
-                    not info.get("duration")
-                    or (info.get("duration") and info.get("duration") in emr.subjective)
+                    not info.duration or (info.duration and info.duration in emr.subjective)
                 ),
                 "error_message": "现病史中缺少病程记录",
             },
@@ -89,7 +92,11 @@ class QAAgent:
             },
         ]
 
-    async def check(self, emr: SOAPNote | Dict, medical_info: Dict) -> QAReport:
+    async def check(
+        self,
+        emr: SOAPNote | Dict,
+        medical_info: MedicalInfoExtraction | Dict,
+    ) -> QAReport:
         """
         检查病历质量
 
@@ -105,27 +112,22 @@ class QAAgent:
 
             # 统一病历输入，避免 dict/object 混用导致属性访问失败
             normalized_emr = self._normalize_emr(emr)
+            normalized_medical_info = self._normalize_medical_info(medical_info)
 
             # 并行执行：规则检查和 LLM 检查
             import asyncio
 
-            # 注意：medical_info 可能是 Pydantic 模型或字典
-            if hasattr(medical_info, "model_dump"):
-                medical_info_dict = medical_info.model_dump()
-            else:
-                medical_info_dict = medical_info
-
             rule_issues, llm_report = await asyncio.gather(
-                asyncio.to_thread(self._check_rules, normalized_emr, medical_info_dict),
-                self._check_with_llm(normalized_emr, medical_info_dict),
+                asyncio.to_thread(self._check_rules, normalized_emr, normalized_medical_info),
+                self._check_with_llm(normalized_emr, normalized_medical_info),
                 return_exceptions=True,
             )
 
             # 处理异常
-            if isinstance(rule_issues, Exception):
+            if isinstance(rule_issues, BaseException):
                 logger.error(f"规则检查失败: {rule_issues}")
                 rule_issues = []
-            if isinstance(llm_report, Exception):
+            if isinstance(llm_report, BaseException):
                 logger.error(f"LLM检查失败: {llm_report}")
                 llm_report = QAReport(is_complete=False, issues=[], score=0.0)
 
@@ -133,10 +135,10 @@ class QAAgent:
             all_issues = rule_issues + llm_report.issues
 
             # 计算分数
-            score = self._calculate_score(normalized_emr, all_issues, medical_info_dict)
+            score = self._calculate_score(normalized_emr, all_issues, normalized_medical_info)
 
             # 判断完整性
-            is_complete = not any(issue.severity == "error" for issue in all_issues)
+            is_complete = not any(issue.severity == QAIssueSeverity.ERROR for issue in all_issues)
 
             report = QAReport(is_complete=is_complete, issues=all_issues, score=score)
 
@@ -149,16 +151,16 @@ class QAAgent:
                 is_complete=False,
                 issues=[
                     QAIssue(
-                        type="error",
+                        type=QAIssueType.WARNING,
                         field="system",
                         message=f"质控检查出错: {str(e)}",
-                        severity="error",
+                        severity=QAIssueSeverity.ERROR,
                     )
                 ],
                 score=0.0,
             )
 
-    def _check_rules(self, emr: SOAPNote, medical_info: Dict) -> List[QAIssue]:
+    def _check_rules(self, emr: SOAPNote, medical_info: MedicalInfoExtraction) -> List[QAIssue]:
         """使用规则进行检查"""
         issues = []
 
@@ -167,10 +169,10 @@ class QAAgent:
                 if not rule["check"](emr, medical_info):
                     issues.append(
                         QAIssue(
-                            type="missing",
+                            type=QAIssueType.MISSING,
                             field=rule["field"],
                             message=rule["error_message"],
-                            severity="warning",
+                            severity=QAIssueSeverity.WARNING,
                         )
                     )
             except Exception as e:
@@ -184,12 +186,29 @@ class QAAgent:
             return emr
         return SOAPNote.model_validate(emr)
 
-    async def _check_with_llm(self, emr: SOAPNote, medical_info: Dict) -> QAReport:
+    def _normalize_medical_info(
+        self,
+        medical_info: MedicalInfoExtraction | Dict,
+    ) -> MedicalInfoExtraction:
+        """统一医疗信息输入为 MedicalInfoExtraction 模型。"""
+        if isinstance(medical_info, MedicalInfoExtraction):
+            return medical_info
+        return MedicalInfoExtraction.model_validate(medical_info)
+
+    async def _check_with_llm(
+        self,
+        emr: SOAPNote,
+        medical_info: MedicalInfoExtraction,
+    ) -> QAReport:
         """使用LLM进行检查"""
         try:
             import json
 
-            medical_text = json.dumps(medical_info, ensure_ascii=False, default=str)
+            medical_text = json.dumps(
+                medical_info.model_dump(mode="json"),
+                ensure_ascii=False,
+                default=str,
+            )
 
             # 构建消息列表
             messages = [
@@ -220,18 +239,21 @@ Plan: {emr.plan}
             return QAReport(is_complete=False, issues=[], score=0.0)
 
     def _calculate_score(
-        self, emr: SOAPNote, issues: List[QAIssue], medical_info: Dict
+        self,
+        emr: SOAPNote,
+        issues: List[QAIssue],
+        medical_info: MedicalInfoExtraction,
     ) -> float:
         """计算质量分数"""
         base_score = 100.0
 
         # 根据问题严重程度扣分
         for issue in issues:
-            if issue.severity == "error":
+            if issue.severity == QAIssueSeverity.ERROR:
                 base_score -= 15
-            elif issue.severity == "warning":
+            elif issue.severity == QAIssueSeverity.WARNING:
                 base_score -= 5
-            elif issue.severity == "info":
+            elif issue.severity == QAIssueSeverity.INFO:
                 base_score -= 1
 
         # 检查SOAP各部分是否完整
@@ -241,39 +263,11 @@ Plan: {emr.plan}
                 base_score -= 5
 
         # 检查是否包含关键信息
-        symptoms = medical_info.get("symptoms", [])
+        symptoms = medical_info.symptoms
         if symptoms:
-            symptom_mentioned = any(symptom in emr.subjective for symptom in symptoms)
+            subjective_lower = emr.subjective.lower()
+            symptom_mentioned = any(symptom.lower() in subjective_lower for symptom in symptoms)
             if not symptom_mentioned:
                 base_score -= 10
 
         return max(0.0, min(100.0, base_score))
-
-
-# 测试代码
-if __name__ == "__main__":
-    import asyncio
-
-    async def test():
-        agent = QAAgent()
-
-        test_emr = SOAPNote(
-            subjective="患者咳嗽1周",
-            objective="建议查血常规",
-            assessment="上呼吸道感染",
-            plan="对症治疗",
-        )
-
-        medical_info = {"symptoms": ["咳嗽", "发热"], "duration": "1周"}
-
-        report = await agent.check(test_emr, medical_info)
-        print(f"\n质控结果:")
-        print(f"是否完整: {report.is_complete}")
-        print(f"分数: {report.score}")
-        print(f"问题数: {len(report.issues)}")
-        if report.issues:
-            print("\n问题列表:")
-            for issue in report.issues:
-                print(f"  - [{issue.severity}] {issue.field}: {issue.message}")
-
-    asyncio.run(test())

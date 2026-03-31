@@ -3,19 +3,22 @@ LlamaIndex 检索 Agent
 基于 LlamaIndex RAG Pipeline 的检索实现
 """
 
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from llama_index.core import VectorStoreIndex
+from llama_index.core.postprocessor.types import BaseNodePostprocessor
 from llama_index.core.retrievers import VectorIndexRetriever
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.postprocessor import SimilarityPostprocessor
 from llama_index.core.schema import NodeWithScore
 
 from src.utils.llama_index_loader import LlamaIndexDocumentLoader
+from src.retrieval import BaseRetrievalStrategy
+from src.exceptions import RetrievalError
 
 
-class LlamaIndexRetrievalAgent:
+class LlamaIndexRetrievalAgent(BaseRetrievalStrategy):
     """
     LlamaIndex 检索 Agent
 
@@ -81,14 +84,21 @@ class LlamaIndexRetrievalAgent:
         Args:
             similarity_top_k: 返回的最相似结果数量
         """
+        if self.index is None:
+            raise RetrievalError("LlamaIndex 索引尚未初始化")
+
+        index = self.index
+
         # 创建向量检索器
         self.retriever = VectorIndexRetriever(
-            index=self.index,
+            index=index,
             similarity_top_k=similarity_top_k,
         )
 
         # 配置后处理器（相似度过滤）
-        node_postprocessors = [SimilarityPostprocessor(similarity_cutoff=0.7)]
+        node_postprocessors: list[BaseNodePostprocessor] = [
+            SimilarityPostprocessor(similarity_cutoff=0.7)
+        ]
 
         # 创建查询引擎
         self.query_engine = RetrieverQueryEngine(
@@ -111,12 +121,16 @@ class LlamaIndexRetrievalAgent:
         """
         if self.query_engine is None:
             await self.initialize()
+        if self.query_engine is None:
+            raise RetrievalError("LlamaIndex 查询引擎初始化失败")
+
+        query_engine = self.query_engine
 
         logger.info(f"[INFO] 执行检索 - 查询: {query[:50]}...")
 
         try:
             # 执行检索
-            response = self.query_engine.query(query)
+            response = query_engine.query(query)
 
             # 提取源节点
             source_nodes: List[NodeWithScore] = response.source_nodes
@@ -128,7 +142,7 @@ class LlamaIndexRetrievalAgent:
                 score = node_with_score.score
 
                 result = {
-                    "content": node.text,
+                    "content": node.get_content(),
                     "metadata": node.metadata,
                     "score": float(score) if score is not None else 0.0,
                     "node_id": node.id_,
@@ -140,7 +154,7 @@ class LlamaIndexRetrievalAgent:
 
         except Exception as e:
             logger.error(f"[ERROR] 检索失败: {e}")
-            return []
+            raise RetrievalError(f"LlamaIndex retrieval failed: {e}") from e
 
     async def retrieve_by_symptoms(
         self, symptoms: List[str], top_k: int = 5
@@ -179,6 +193,10 @@ class LlamaIndexRetrievalAgent:
         """
         if self.retriever is None:
             await self.initialize()
+        if self.retriever is None:
+            raise RetrievalError("LlamaIndex 检索器初始化失败")
+
+        retriever = self.retriever
 
         logger.info(f"[INFO] 执行过滤检索 - 查询: {query[:50]}..., 过滤: {filters}")
 
@@ -187,14 +205,11 @@ class LlamaIndexRetrievalAgent:
             from llama_index.core.vector_stores import MetadataFilters, ExactMatchFilter
 
             metadata_filters = MetadataFilters(
-                filters=[
-                    ExactMatchFilter(key=key, value=value)
-                    for key, value in filters.items()
-                ]
+                filters=[ExactMatchFilter(key=key, value=value) for key, value in filters.items()]
             )
 
             # 使用过滤器执行检索
-            nodes_with_scores = self.retriever.retrieve(query)
+            nodes_with_scores = retriever.retrieve(query)
 
             # 手动应用过滤器（因为某些向量存储可能不完全支持元数据过滤）
             filtered_results = []
@@ -203,14 +218,12 @@ class LlamaIndexRetrievalAgent:
                 score = node_with_score.score
 
                 # 检查是否满足所有过滤条件
-                match = all(
-                    node.metadata.get(key) == value for key, value in filters.items()
-                )
+                match = all(node.metadata.get(key) == value for key, value in filters.items())
 
                 if match:
                     filtered_results.append(
                         {
-                            "content": node.text,
+                            "content": node.get_content(),
                             "metadata": node.metadata,
                             "score": float(score) if score is not None else 0.0,
                             "node_id": node.id_,
@@ -225,7 +238,7 @@ class LlamaIndexRetrievalAgent:
 
         except Exception as e:
             logger.error(f"[ERROR] 过滤检索失败: {e}")
-            return []
+            raise RetrievalError(f"LlamaIndex filtered retrieval failed: {e}") from e
 
     def get_stats(self) -> Dict[str, Any]:
         """
@@ -253,9 +266,7 @@ class LlamaIndexRetrievalAgent:
             logger.error(f"[ERROR] 获取统计信息失败: {e}")
             return {"status": "error", "error": str(e)}
 
-    async def rebuild_index(
-        self, source_path: str = "./data/guidelines/clinical_guidelines.json"
-    ):
+    async def rebuild_index(self, source_path: str = "./data/guidelines/clinical_guidelines.json"):
         """
         重建索引
 

@@ -5,10 +5,11 @@ only lightweight regression signals for API-wrapper overhead. They are intention
 treated as real production benchmarks.
 """
 
+from contextlib import contextmanager
 import time
 import statistics
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 from fastapi.testclient import TestClient
 
 from src.main import app
@@ -16,6 +17,11 @@ from src.rag import InMemoryDocumentRepository
 from src.rag.service import VersionedTenantRAGService, DedupMode
 from src.services.rag_service import RAGService
 from src.api.routes import get_rag_service, get_versioned_rag_service
+
+
+MAX_AVG_UPLOAD_MS = 5000.0
+MAX_DEDUP_SKIP_MS = 2000.0
+MIN_DEDUP_SPEEDUP = 0.5
 
 
 def _mock_doc() -> SimpleNamespace:
@@ -62,6 +68,7 @@ class TestUploadPerformance:
         }
 
     @staticmethod
+    @contextmanager
     def _create_test_client():
         """Create a TestClient with mocked services for performance testing."""
         # Create shared repository
@@ -83,24 +90,21 @@ class TestUploadPerformance:
         legacy_service._core_service = versioned_service
         legacy_service._loader = versioned_service._loader
 
-        # Patch and create client
-        patcher1 = patch("src.api.routes.get_rag_service", return_value=legacy_service)
-        patcher2 = patch("src.api.routes.get_versioned_rag_service", return_value=versioned_service)
-
-        patcher1.start()
-        patcher2.start()
-
-        client = TestClient(app)
-
-        return client, shared_repository, mock_loader, (patcher1, patcher2)
+        app.dependency_overrides[get_rag_service] = lambda: legacy_service
+        app.dependency_overrides[get_versioned_rag_service] = lambda: versioned_service
+        try:
+            with TestClient(app) as client:
+                yield client, shared_repository, mock_loader
+        finally:
+            app.dependency_overrides.pop(get_rag_service, None)
+            app.dependency_overrides.pop(get_versioned_rag_service, None)
 
     def test_legacy_upload_performance(self):
         """Record timing sanity for the legacy upload endpoint."""
         iterations = 10
         timings = []
 
-        client, repo, loader, patchers = self._create_test_client()
-        try:
+        with self._create_test_client() as (client, repo, loader):
             for i in range(iterations):
                 file_content = f"test content for iteration {i}".encode()
 
@@ -112,9 +116,6 @@ class TestUploadPerformance:
 
                 assert response.status_code == 200
                 timings.append(timer.elapsed)
-        finally:
-            for patcher in patchers:
-                patcher.stop()
 
         summary = self._summarize_timings(timings)
         print("\n=== Legacy Upload Timing Sanity ===")
@@ -123,6 +124,7 @@ class TestUploadPerformance:
         print(f"Min: {summary['min_ms']:.2f}ms")
         print(f"Max: {summary['max_ms']:.2f}ms")
         assert summary["avg_ms"] > 0
+        assert summary["avg_ms"] < MAX_AVG_UPLOAD_MS
         assert summary["max_ms"] >= summary["min_ms"]
 
     def test_versioned_upload_performance(self):
@@ -130,8 +132,7 @@ class TestUploadPerformance:
         iterations = 10
         timings = []
 
-        client, repo, loader, patchers = self._create_test_client()
-        try:
+        with self._create_test_client() as (client, repo, loader):
             for i in range(iterations):
                 file_content = f"versioned content for iteration {i}".encode()
 
@@ -144,9 +145,6 @@ class TestUploadPerformance:
 
                 assert response.status_code == 200
                 timings.append(timer.elapsed)
-        finally:
-            for patcher in patchers:
-                patcher.stop()
 
         summary = self._summarize_timings(timings)
         print("\n=== Versioned Upload Timing Sanity ===")
@@ -155,6 +153,7 @@ class TestUploadPerformance:
         print(f"Min: {summary['min_ms']:.2f}ms")
         print(f"Max: {summary['max_ms']:.2f}ms")
         assert summary["avg_ms"] > 0
+        assert summary["avg_ms"] < MAX_AVG_UPLOAD_MS
         assert summary["max_ms"] >= summary["min_ms"]
 
     def test_dedup_skip_performance(self):
@@ -163,8 +162,7 @@ class TestUploadPerformance:
         first_upload_timings = []
         dedup_timings = []
 
-        client, repo, loader, patchers = self._create_test_client()
-        try:
+        with self._create_test_client() as (client, repo, loader):
             # First upload (baseline)
             file_content = b"identical content for dedup performance test"
 
@@ -190,9 +188,6 @@ class TestUploadPerformance:
                 data = response.json()
                 assert data["dedup_hit"] is True  # Verify dedup was triggered
                 dedup_timings.append(timer.elapsed)
-        finally:
-            for patcher in patchers:
-                patcher.stop()
 
         first_avg = statistics.mean(first_upload_timings)
         dedup_avg = statistics.mean(dedup_timings)
@@ -205,6 +200,8 @@ class TestUploadPerformance:
         print(f"Relative Speedup: {speedup:.2f}x")
         assert first_avg > 0
         assert dedup_avg > 0
+        assert dedup_avg * 1000 < MAX_DEDUP_SKIP_MS
+        assert speedup > MIN_DEDUP_SPEEDUP
 
     def test_combined_performance_summary(self):
         """Generate one mocked timing summary without calling other test methods."""
@@ -212,8 +209,7 @@ class TestUploadPerformance:
         print("RAG UPLOAD TIMING SANITY SUMMARY")
         print("=" * 50)
 
-        client, repo, loader, patchers = self._create_test_client()
-        try:
+        with self._create_test_client() as (client, repo, loader):
             legacy_timings = []
             versioned_timings = []
             dedup_timings = []
@@ -257,9 +253,6 @@ class TestUploadPerformance:
                 assert dedup_response.status_code == 200
                 assert dedup_response.json()["dedup_hit"] is True
                 dedup_timings.append(timer.elapsed)
-        finally:
-            for patcher in patchers:
-                patcher.stop()
 
         results = {
             "legacy": self._summarize_timings(legacy_timings),
@@ -294,3 +287,6 @@ class TestUploadPerformance:
         assert results["legacy"]["avg_ms"] > 0
         assert results["versioned"]["avg_ms"] > 0
         assert results["dedup_skip"]["avg_ms"] > 0
+        assert results["legacy"]["avg_ms"] < MAX_AVG_UPLOAD_MS
+        assert results["versioned"]["avg_ms"] < MAX_AVG_UPLOAD_MS
+        assert results["dedup_skip"]["avg_ms"] < MAX_DEDUP_SKIP_MS

@@ -9,11 +9,12 @@ from pathlib import Path
 import json
 
 from src.config import get_settings
+from src.retrieval import BaseRetrievalStrategy
 
 settings = get_settings()
 
 
-class LlamaGraphRAGAgent:
+class LlamaGraphRAGAgent(BaseRetrievalStrategy):
     """基于 LlamaIndex Property Graph Index 的医疗指南检索。"""
 
     def __init__(self):
@@ -149,19 +150,23 @@ class LlamaGraphRAGAgent:
 
     def _retrieve_nodes(self, query: str, top_k: int):
         """执行检索，优先混合模式，失败时降级到相似度检索。"""
+        if self.index is None:
+            raise RuntimeError("LlamaGraph 索引未初始化")
+
+        index = self.index
         retriever = None
 
         try:
-            retriever = self.index.as_retriever(
+            retriever = index.as_retriever(
                 mode="hybrid",
                 similarity_top_k=top_k,
                 graph_store_query_depth=2,
             )
         except Exception:
             try:
-                retriever = self.index.as_retriever(similarity_top_k=top_k)
+                retriever = index.as_retriever(similarity_top_k=top_k)
             except Exception:
-                retriever = self.index.as_retriever()
+                retriever = index.as_retriever()
 
         return retriever.retrieve(query)
 
@@ -177,16 +182,7 @@ class LlamaGraphRAGAgent:
         await self._ensure_index()
         if self.index is None:
             logger.warning("LlamaGraph 索引不可用，降级到关键词检索")
-            if self._simple_fallback is None:
-                from src.agents.retrieval_agent_simple import SimpleRetrievalAgent
-
-                self._simple_fallback = SimpleRetrievalAgent()
-            results = await self._simple_fallback.retrieve_by_symptoms(
-                symptoms, top_k=top_k
-            )
-            for item in results:
-                item["source"] = "fallback_simple"
-            return results
+            return await self._fallback_to_simple(symptoms, top_k)
 
         query = f"患者症状: {', '.join(symptoms)}。请查找相关诊断和治疗方案。"
 
@@ -194,16 +190,7 @@ class LlamaGraphRAGAgent:
             nodes = self._retrieve_nodes(query=query, top_k=top_k)
         except Exception as e:
             logger.error(f"LlamaGraph 检索失败，降级到关键词检索: {str(e)}")
-            if self._simple_fallback is None:
-                from src.agents.retrieval_agent_simple import SimpleRetrievalAgent
-
-                self._simple_fallback = SimpleRetrievalAgent()
-            results = await self._simple_fallback.retrieve_by_symptoms(
-                symptoms, top_k=top_k
-            )
-            for item in results:
-                item["source"] = "fallback_simple"
-            return results
+            return await self._fallback_to_simple(symptoms, top_k)
 
         results: List[Dict[str, Any]] = []
         for node in nodes:
@@ -233,3 +220,22 @@ class LlamaGraphRAGAgent:
 
         logger.info(f"GraphRAG 检索到 {len(results)} 条相关指南")
         return results[:top_k]
+
+    async def _fallback_to_simple(self, symptoms: List[str], top_k: int) -> List[Dict[str, Any]]:
+        """降级到 SimpleRetrievalAgent 的关键词检索。"""
+        if self._simple_fallback is None:
+            from src.retrieval import get_simple_fallback_agent
+
+            self._simple_fallback = get_simple_fallback_agent()
+        results = await self._simple_fallback.retrieve_by_symptoms(symptoms, top_k=top_k)
+        for item in results:
+            item["source"] = "fallback_simple"
+        return results
+
+    async def retrieve(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
+        """基于 query 文本进行 GraphRAG 检索（接口合规）。"""
+        # 简单分词后委托给 retrieve_by_symptoms
+        symptoms = [s.strip() for s in query.replace("，", ",").split(",") if s.strip()]
+        if not symptoms:
+            symptoms = query.split()
+        return await self.retrieve_by_symptoms(symptoms, top_k=top_k)

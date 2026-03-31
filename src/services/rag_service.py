@@ -11,14 +11,12 @@ import re
 from typing import Optional, Tuple
 
 from loguru import logger
-
-from src.rag.service import VersionedTenantRAGService, RAGCoreServiceError
-
-
-# 支持的文件扩展名
-SUPPORTED_EXTS = frozenset({".json", ".pdf", ".txt"})
-# 最大上传文件大小：10MB
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+from src.rag.service import (
+    MAX_UPLOAD_BYTES,
+    SUPPORTED_EXTS,
+    VersionedTenantRAGService,
+    RAGCoreServiceError,
+)
 
 
 class RAGServiceError(Exception):

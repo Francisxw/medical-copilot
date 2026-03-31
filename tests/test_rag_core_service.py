@@ -1,6 +1,6 @@
 """Unit tests for the versioned tenant-aware RAG service core."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -254,7 +254,7 @@ def test_upload_with_existing_active_document_resolves_by_logical_name(
         original_filename="same.txt",
         stored_filename="stored-existing.txt",
         collection_name="tenant_tenant-a__kb_kb-1",
-        uploaded_at=datetime.utcnow(),
+        uploaded_at=datetime.now(timezone.utc),
         is_active=True,
         replaced_by=None,
         chunk_count=1,

@@ -2,17 +2,19 @@
 简化版检索Agent - 使用关键词匹配替代向量检索
 适用于没有Embedding API的场景（如DeepSeek）
 """
+
 from typing import List, Dict, Any
 from loguru import logger
 import json
 from pathlib import Path
 
 from src.config import get_settings
+from src.retrieval import BaseRetrievalStrategy
 
 settings = get_settings()
 
 
-class SimpleRetrievalAgent:
+class SimpleRetrievalAgent(BaseRetrievalStrategy):
     """
     简化版知识检索Agent
     使用关键词匹配而非向量检索
@@ -39,32 +41,23 @@ class SimpleRetrievalAgent:
         guideline_content = guideline.get("content", "")
         guideline_title = guideline.get("title", "")
 
-        # 计算匹配分数
         score = 0.0
 
-        # 关键词匹配（权重高）
         for symptom in symptoms:
+            # 关键词匹配（权重高）
             for keyword in guideline_keywords:
                 if symptom in keyword or keyword in symptom:
                     score += 2.0
-
-        # 标题匹配
-        for symptom in symptoms:
+            # 标题匹配
             if symptom in guideline_title:
                 score += 1.0
-
-        # 内容匹配（权重低）
-        for symptom in symptoms:
+            # 内容匹配（权重低）
             if symptom in guideline_content:
                 score += 0.5
 
         return score
 
-    async def retrieve(
-        self,
-        query: str,
-        top_k: int = 3
-    ) -> List[Dict[str, Any]]:
+    async def retrieve(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
         """
         检索相关临床指南（基于query文本）
 
@@ -81,9 +74,7 @@ class SimpleRetrievalAgent:
         return await self.retrieve_by_keywords(keywords, top_k)
 
     async def retrieve_by_symptoms(
-        self,
-        symptoms: List[str],
-        top_k: int = 3
+        self, symptoms: List[str], top_k: int = 3
     ) -> List[Dict[str, Any]]:
         """
         基于症状列表检索指南
@@ -98,9 +89,7 @@ class SimpleRetrievalAgent:
         return await self.retrieve_by_keywords(symptoms, top_k)
 
     async def retrieve_by_keywords(
-        self,
-        keywords: List[str],
-        top_k: int = 3
+        self, keywords: List[str], top_k: int = 3
     ) -> List[Dict[str, Any]]:
         """
         基于关键词检索指南
@@ -124,15 +113,17 @@ class SimpleRetrievalAgent:
             for guideline in self.guidelines:
                 score = self._calculate_relevance(keywords, guideline)
                 if score > 0:  # 只返回有匹配的结果
-                    scored_guidelines.append({
-                        "content": guideline["content"],
-                        "metadata": {
-                            "id": guideline["id"],
-                            "title": guideline["title"],
-                            "category": guideline["metadata"]["category"]
-                        },
-                        "relevance_score": score
-                    })
+                    scored_guidelines.append(
+                        {
+                            "content": guideline["content"],
+                            "metadata": {
+                                "id": guideline["id"],
+                                "title": guideline["title"],
+                                "category": guideline["metadata"]["category"],
+                            },
+                            "relevance_score": score,
+                        }
+                    )
 
             # 按相关度排序
             scored_guidelines.sort(key=lambda x: x["relevance_score"], reverse=True)
@@ -146,22 +137,3 @@ class SimpleRetrievalAgent:
         except Exception as e:
             logger.error(f"检索失败: {str(e)}")
             return []
-
-
-# 测试代码
-if __name__ == "__main__":
-    import asyncio
-
-    async def test():
-        agent = SimpleRetrievalAgent()
-
-        # 测试检索
-        results = await agent.retrieve_by_symptoms(["咳嗽", "发热"])
-        print(f"\n检索到 {len(results)} 条指南:")
-        for i, guideline in enumerate(results, 1):
-            print(f"\n指南 {i}:")
-            print(f"标题: {guideline['metadata']['title']}")
-            print(f"相关度: {guideline['relevance_score']:.1f}")
-            print(f"内容: {guideline['content'][:100]}...")
-
-    asyncio.run(test())

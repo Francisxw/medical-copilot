@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 from src.main import app
+from src.api.routes import get_rag_service, get_versioned_rag_service
 from src.services.rag_service import RAGServiceError
 
 
@@ -25,8 +26,11 @@ def mock_legacy_service():
 @pytest.fixture
 def client_with_mock_legacy_service(mock_legacy_service):
     """Fixture providing a TestClient with mocked legacy service."""
-    with patch("src.api.routes.get_rag_service", return_value=mock_legacy_service):
+    app.dependency_overrides[get_rag_service] = lambda: mock_legacy_service
+    try:
         yield TestClient(app)
+    finally:
+        app.dependency_overrides.pop(get_rag_service, None)
 
 
 def test_legacy_upload_happy_path(client_with_mock_legacy_service, mock_legacy_service):
@@ -117,7 +121,8 @@ def test_versioned_route_still_works():
         dedup_hit=False,
         message="Upload indexed successfully",
     )
-    with patch("src.api.routes.get_versioned_rag_service", return_value=mock_versioned_service):
+    app.dependency_overrides[get_versioned_rag_service] = lambda: mock_versioned_service
+    try:
         client = TestClient(app)
         response = client.post(
             "/api/rag/upload-versioned",
@@ -128,3 +133,5 @@ def test_versioned_route_still_works():
         data = response.json()
         assert data["document_id"] == "doc-123"
         assert data["version_id"] == "ver-456"
+    finally:
+        app.dependency_overrides.pop(get_versioned_rag_service, None)

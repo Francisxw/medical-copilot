@@ -5,7 +5,7 @@
 """
 
 import pytest
-from datetime import datetime
+from datetime import datetime, timezone
 
 from src.rag.repository import DocumentRecord, DocumentVersionRecord
 from src.rag import InMemoryDocumentRepository
@@ -30,7 +30,7 @@ def sample_version():
         original_filename="test.txt",
         stored_filename="stored_test.txt",
         collection_name="col1",
-        uploaded_at=datetime.utcnow(),
+        uploaded_at=datetime.now(timezone.utc),
         is_active=True,
         replaced_by=None,
         chunk_count=10,
@@ -75,7 +75,7 @@ class TestDocumentCreationAndLookup:
             original_filename="test.txt",
             stored_filename="stored_test.txt",
             collection_name="col1",
-            uploaded_at=datetime.utcnow(),
+            uploaded_at=datetime.now(timezone.utc),
             is_active=True,
             replaced_by=None,
             chunk_count=10,
@@ -141,7 +141,7 @@ class TestVersionManagement:
             original_filename="test.txt",
             stored_filename="stored1.txt",
             collection_name="col1",
-            uploaded_at=datetime.utcnow(),
+            uploaded_at=datetime.now(timezone.utc),
             is_active=False,
             replaced_by=None,
             chunk_count=5,
@@ -157,7 +157,7 @@ class TestVersionManagement:
             original_filename="test.txt",
             stored_filename="stored2.txt",
             collection_name="col1",
-            uploaded_at=datetime.utcnow(),
+            uploaded_at=datetime.now(timezone.utc),
             is_active=True,
             replaced_by=None,
             chunk_count=10,
@@ -167,6 +167,65 @@ class TestVersionManagement:
         repo.create_version(v2)
         latest = repo.get_latest_version(doc.document_id)
         assert latest == v2
+
+    def test_get_latest_version_tracks_highest_version_when_added_out_of_order(self, repo):
+        """最新版本应始终是版本号最大的记录，而不是最后追加的记录。"""
+        doc = repo.create_document("tenant1", "kb1", "doc1.txt")
+        v3 = DocumentVersionRecord(
+            version_id="v3",
+            document_id=doc.document_id,
+            tenant_id="tenant1",
+            kb_id="kb1",
+            version=3,
+            content_hash="hash3",
+            original_filename="test.txt",
+            stored_filename="stored3.txt",
+            collection_name="col1",
+            uploaded_at=datetime.now(timezone.utc),
+            is_active=True,
+            replaced_by=None,
+            chunk_count=15,
+            metadata={},
+        )
+        v1 = DocumentVersionRecord(
+            version_id="v1",
+            document_id=doc.document_id,
+            tenant_id="tenant1",
+            kb_id="kb1",
+            version=1,
+            content_hash="hash1",
+            original_filename="test.txt",
+            stored_filename="stored1.txt",
+            collection_name="col1",
+            uploaded_at=datetime.now(timezone.utc),
+            is_active=False,
+            replaced_by="v2",
+            chunk_count=5,
+            metadata={},
+        )
+        v2 = DocumentVersionRecord(
+            version_id="v2",
+            document_id=doc.document_id,
+            tenant_id="tenant1",
+            kb_id="kb1",
+            version=2,
+            content_hash="hash2",
+            original_filename="test.txt",
+            stored_filename="stored2.txt",
+            collection_name="col1",
+            uploaded_at=datetime.now(timezone.utc),
+            is_active=False,
+            replaced_by="v3",
+            chunk_count=10,
+            metadata={},
+        )
+
+        repo.create_version(v3)
+        repo.create_version(v1)
+        repo.create_version(v2)
+
+        latest = repo.get_latest_version(doc.document_id)
+        assert latest == v3
 
     def test_find_version_by_hash(self, repo, sample_version):
         """通过内容哈希查找版本"""
@@ -211,7 +270,7 @@ class TestTenantIsolation:
             original_filename="test.txt",
             stored_filename="stored1.txt",
             collection_name="col1",
-            uploaded_at=datetime.utcnow(),
+            uploaded_at=datetime.now(timezone.utc),
             is_active=True,
             replaced_by=None,
             chunk_count=5,
@@ -227,7 +286,7 @@ class TestTenantIsolation:
             original_filename="test.txt",
             stored_filename="stored2.txt",
             collection_name="col2",
-            uploaded_at=datetime.utcnow(),
+            uploaded_at=datetime.now(timezone.utc),
             is_active=True,
             replaced_by=None,
             chunk_count=5,
@@ -259,7 +318,7 @@ class TestTenantIsolation:
             original_filename="test.txt",
             stored_filename="stored1.txt",
             collection_name="col1",
-            uploaded_at=datetime.utcnow(),
+            uploaded_at=datetime.now(timezone.utc),
             is_active=True,
             replaced_by=None,
             chunk_count=5,
@@ -296,7 +355,7 @@ class TestVersionHistoryRetrieval:
             original_filename="test.txt",
             stored_filename="stored1.txt",
             collection_name="col1",
-            uploaded_at=datetime.utcnow(),
+            uploaded_at=datetime.now(timezone.utc),
             is_active=True,
             replaced_by=None,
             chunk_count=5,
@@ -321,7 +380,7 @@ class TestVersionHistoryRetrieval:
             original_filename="test.txt",
             stored_filename="stored3.txt",
             collection_name="col1",
-            uploaded_at=datetime.utcnow(),
+            uploaded_at=datetime.now(timezone.utc),
             is_active=True,
             replaced_by=None,
             chunk_count=15,
@@ -337,7 +396,7 @@ class TestVersionHistoryRetrieval:
             original_filename="test.txt",
             stored_filename="stored1.txt",
             collection_name="col1",
-            uploaded_at=datetime.utcnow(),
+            uploaded_at=datetime.now(timezone.utc),
             is_active=False,
             replaced_by="v2",
             chunk_count=5,
@@ -353,7 +412,7 @@ class TestVersionHistoryRetrieval:
             original_filename="test.txt",
             stored_filename="stored2.txt",
             collection_name="col1",
-            uploaded_at=datetime.utcnow(),
+            uploaded_at=datetime.now(timezone.utc),
             is_active=False,
             replaced_by="v3",
             chunk_count=10,
@@ -387,7 +446,7 @@ class TestVersionHistoryRetrieval:
             original_filename="test.txt",
             stored_filename="stored1.txt",
             collection_name="col1",
-            uploaded_at=datetime.utcnow(),
+            uploaded_at=datetime.now(timezone.utc),
             is_active=False,
             replaced_by="v2",
             chunk_count=5,
@@ -403,7 +462,7 @@ class TestVersionHistoryRetrieval:
             original_filename="test.txt",
             stored_filename="stored2.txt",
             collection_name="col1",
-            uploaded_at=datetime.utcnow(),
+            uploaded_at=datetime.now(timezone.utc),
             is_active=True,
             replaced_by=None,
             chunk_count=10,
@@ -436,7 +495,7 @@ class TestVersionHistoryRetrieval:
             original_filename="test1.txt",
             stored_filename="stored1.txt",
             collection_name="col1",
-            uploaded_at=datetime.utcnow(),
+            uploaded_at=datetime.now(timezone.utc),
             is_active=True,
             replaced_by=None,
             chunk_count=5,
@@ -452,7 +511,7 @@ class TestVersionHistoryRetrieval:
             original_filename="test2.txt",
             stored_filename="stored2.txt",
             collection_name="col1",
-            uploaded_at=datetime.utcnow(),
+            uploaded_at=datetime.now(timezone.utc),
             is_active=True,
             replaced_by=None,
             chunk_count=5,

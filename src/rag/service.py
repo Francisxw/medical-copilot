@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 import hashlib
 import json
@@ -15,7 +15,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from src.rag.repository import DocumentRepository, DocumentVersionRecord, InMemoryDocumentRepository
 
 
-SUPPORTED_EXTS = {".json", ".pdf", ".txt"}
+SUPPORTED_EXTS = frozenset({".json", ".pdf", ".txt"})
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 
@@ -165,7 +165,7 @@ class VersionedTenantRAGService:
             original_filename=filename,
             stored_filename=stored_filename,
             collection_name=collection_name,
-            uploaded_at=datetime.utcnow(),
+            uploaded_at=datetime.now(timezone.utc),
             is_active=True,
             replaced_by=None,
             chunk_count=len(nodes),

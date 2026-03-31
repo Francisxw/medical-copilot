@@ -803,8 +803,8 @@ def main():
                         unsafe_allow_html=True,
                     )
                     for i, issue in enumerate(issues, 1):
-                        msg = issue.get("message", "未知建议")
-                        field = issue.get("field", "通用")
+                        msg = html.escape(str(issue.get("message") or "未知建议"))
+                        field = html.escape(str(issue.get("field") or "通用"))
                         st.markdown(
                             f"<div style='font-size: 13px; color: #666; margin-top: 4px;'>{i}. [{field}] {msg}</div>",
                             unsafe_allow_html=True,
@@ -831,12 +831,13 @@ def main():
             else:
 
                 def render_soap_box(letter, title, content):
+                    escaped_content = html.escape(str(content or "无"))
                     return f"""
                     <div class="soap-box">
                         <div class="soap-box-title">
                             <span class="soap-letter">{letter}</span> {title}
                         </div>
-                        <div class="soap-content">{content}</div>
+                        <div class="soap-content">{escaped_content}</div>
                     </div>
                     """
 

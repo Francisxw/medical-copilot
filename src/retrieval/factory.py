@@ -6,7 +6,7 @@
 from loguru import logger
 from typing import Dict, Type
 
-from src.retrieval import RetrievalMode
+from src.retrieval import RetrievalMode, BaseRetrievalStrategy
 from src.config import get_settings
 
 settings = get_settings()

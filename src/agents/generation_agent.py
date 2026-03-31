@@ -10,6 +10,7 @@ from loguru import logger
 from src.config import get_settings
 from src.models.function_schemas import SOAPNote, MedicalInfoExtraction
 from src.utils.llm_adapter import StructuredOutputAdapter
+from src.exceptions import GenerationError
 
 settings = get_settings()
 
@@ -112,13 +113,12 @@ class GenerationAgent:
             return soap_note
         except Exception as e:
             logger.error(f"[FAIL] SOAP病历生成失败: {str(e)}")
-            raise
+            raise GenerationError(f"Failed to generate SOAP note: {e}") from e
 
     def _format_patient_info(self, patient_info: Dict) -> str:
         """格式化患者信息"""
         return (
-            f"年龄: {patient_info.get('age', '未知')}\n"
-            f"性别: {patient_info.get('gender', '未知')}"
+            f"年龄: {patient_info.get('age', '未知')}\n性别: {patient_info.get('gender', '未知')}"
         )
 
     def _normalize_medical_info(
@@ -154,26 +154,3 @@ class GenerationAgent:
                 f"(相关度: {guideline.get('relevance_score', 0):.2f})"
             )
         return "\n".join(formatted)
-
-
-# 测试代码
-if __name__ == "__main__":
-    import asyncio
-
-    async def test():
-        agent = GenerationAgent()
-
-        patient_info = {"age": 35, "gender": "男"}
-        medical_info = MedicalInfoExtraction(
-            symptoms=["咳嗽", "发热"], duration="1周", severity="中等"
-        )
-        guidelines = []
-
-        result = await agent.generate(patient_info, medical_info, guidelines)
-        print("\n=== SOAP病历 ===")
-        print(f"Subjective: {result.subjective}")
-        print(f"Objective: {result.objective}")
-        print(f"Assessment: {result.assessment}")
-        print(f"Plan: {result.plan}")
-
-    asyncio.run(test())

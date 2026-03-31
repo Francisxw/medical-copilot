@@ -3,10 +3,10 @@ FastAPI路由定义
 依赖注入方式获取工作流实例
 """
 
-from fastapi import APIRouter, HTTPException, Depends, File, UploadFile, Header, Query
+from fastapi import APIRouter, HTTPException, Depends, File, UploadFile, Header, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from loguru import logger
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING
 
 from src.models.schemas import (
     AudioTranscriptionResponse,
@@ -19,7 +19,12 @@ from src.models.schemas import (
 from src.graph.workflow import MedicalCopilotWorkflow
 from src.services.asr_service import ASRService, ASRServiceError
 from src.services.rag_service import RAGService, RAGServiceError
-from src.rag.service import VersionedTenantRAGService, DedupMode, RAGCoreServiceError
+from src.rag.service import (
+    MAX_UPLOAD_BYTES,
+    VersionedTenantRAGService,
+    DedupMode,
+    RAGCoreServiceError,
+)
 
 # 使用 TYPE_CHECKING 避免循环导入
 if TYPE_CHECKING:
@@ -32,52 +37,78 @@ LEGACY_DEFAULT_COLLECTION_NAME = LEGACY_DEFAULT_SCOPE
 # 创建路由器
 router = APIRouter()
 
-# 存储工作流实例的容器（通过依赖注入访问）
-_workflow_instance: "MedicalCopilotWorkflow | None" = None
-_asr_service_instance: ASRService | None = None
-_rag_service_instance: RAGService | None = None
+# ---------------------------------------------------------------------------
+# Upload size limit helpers
+# ---------------------------------------------------------------------------
+# Maximum upload body size for file endpoints.
+MAX_UPLOAD_SIZE = MAX_UPLOAD_BYTES
 
 
-def set_workflow_instance(workflow: "MedicalCopilotWorkflow") -> None:
-    """设置工作流实例（由 main.py 在 lifespan 中调用）"""
-    global _workflow_instance
-    _workflow_instance = workflow
+async def _read_upload_bounded(
+    upload: UploadFile,
+    max_size: int = MAX_UPLOAD_SIZE,
+) -> bytes:
+    """Read an upload in bounded chunks to avoid unbounded memory consumption.
+
+    Reads up to ``max_size + 1`` bytes so we can detect overshoot without
+    buffering the entire (potentially huge) file.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await upload.read(1024 * 1024)  # 1 MB at a time
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_size:
+            raise HTTPException(
+                status_code=413,
+                detail=f"上传文件过大，最大允许 {max_size // (1024 * 1024)}MB",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
-def get_workflow() -> "MedicalCopilotWorkflow":
+# ---------------------------------------------------------------------------
+# Service getters — read from app.state (lifespan-managed) with lazy fallback
+# ---------------------------------------------------------------------------
+
+
+def get_workflow(request: Request) -> "MedicalCopilotWorkflow":
     """依赖函数：通过 app.state 获取工作流实例"""
-    if _workflow_instance is None:
+    workflow = getattr(request.app.state, "workflow", None)
+    if workflow is None:
         raise RuntimeError("工作流未初始化，请确保应用已启动")
-    return _workflow_instance
+    return workflow
 
 
-def get_asr_service() -> ASRService:
+def get_asr_service(request: Request) -> ASRService:
     """获取语音识别服务实例。"""
-    global _asr_service_instance
-
-    if _asr_service_instance is None:
-        _asr_service_instance = ASRService()
-
-    return _asr_service_instance
+    svc = getattr(request.app.state, "asr_service", None)
+    if svc is None:
+        raise RuntimeError("语音识别服务未初始化，请确保应用已启动")
+    return svc
 
 
-def get_rag_service() -> RAGService:
+def get_rag_service(request: Request) -> RAGService:
     """获取RAG服务实例。"""
-    global _rag_service_instance
-    if _rag_service_instance is None:
-        _rag_service_instance = RAGService()
-    return _rag_service_instance
+    svc = getattr(request.app.state, "rag_service", None)
+    if svc is None:
+        raise RuntimeError("RAG 服务未初始化，请确保应用已启动")
+    return svc
 
 
-_versioned_rag_service_instance: VersionedTenantRAGService | None = None
-
-
-def get_versioned_rag_service() -> VersionedTenantRAGService:
+def get_versioned_rag_service(request: Request) -> VersionedTenantRAGService:
     """获取版本化多租户RAG服务实例。"""
-    global _versioned_rag_service_instance
-    if _versioned_rag_service_instance is None:
-        _versioned_rag_service_instance = VersionedTenantRAGService()
-    return _versioned_rag_service_instance
+    svc = getattr(request.app.state, "versioned_rag_service", None)
+    if svc is None:
+        raise RuntimeError("版本化 RAG 服务未初始化，请确保应用已启动")
+    return svc
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -91,7 +122,7 @@ async def health_check():
 @router.post("/api/generate-emr", response_model=GenerateEMRResponse)
 async def generate_emr(
     request: GenerateEMRRequest,
-    workflow: Annotated[MedicalCopilotWorkflow, Depends(get_workflow)],
+    workflow: MedicalCopilotWorkflow = Depends(get_workflow),
 ):
     """
     生成电子病历
@@ -107,56 +138,49 @@ async def generate_emr(
     Raises:
         HTTPException: 生成失败时抛出
     """
-    try:
-        logger.info(f"收到病历生成请求: {len(request.conversation)} 轮对话")
+    logger.info(f"收到病历生成请求: {len(request.conversation)} 轮对话")
 
-        # 转换请求数据为工作流输入格式
-        inputs = {
-            "conversation": [
-                {"role": turn.role, "content": turn.content} for turn in request.conversation
-            ],
-            "patient_info": request.patient_info.model_dump(),
-        }
+    # 转换请求数据为工作流输入格式
+    inputs = {
+        "conversation": [
+            {"role": turn.role, "content": turn.content} for turn in request.conversation
+        ],
+        "patient_info": request.patient_info.model_dump(),
+    }
 
-        # 运行工作流
-        result = await workflow.run(inputs)
+    # 运行工作流 — unexpected exceptions propagate to the global handler.
+    result = await workflow.run(inputs)
 
-        # 检查是否有错误
-        if result.get("error_message"):
-            raise HTTPException(status_code=500, detail=result["error_message"])
+    # 检查是否有错误
+    if result.get("error_message"):
+        raise HTTPException(status_code=500, detail=result["error_message"])
 
-        # 构建响应
-        response = GenerateEMRResponse(
-            session_id=result["session_id"],
-            timestamp=result["timestamp"],
-            patient_info=request.patient_info,
-            final_emr=result["final_emr"],
-            qa_report=result["qa_report"],
-            iteration_count=result["iteration_count"],
-            error_message=result.get("error_message"),
-        )
+    # 构建响应
+    response = GenerateEMRResponse(
+        session_id=result["session_id"],
+        timestamp=result["timestamp"],
+        patient_info=request.patient_info,
+        final_emr=result["final_emr"],
+        qa_report=result["qa_report"],
+        iteration_count=result["iteration_count"],
+        error_message=result.get("error_message"),
+    )
 
-        logger.info(f"病历生成成功: {result['session_id']}")
-        return response
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"生成病历失败: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"生成病历时发生错误: {str(e)}")
+    logger.info(f"病历生成成功: {result['session_id']}")
+    return response
 
 
 @router.post("/api/transcribe-audio", response_model=AudioTranscriptionResponse)
 async def transcribe_audio(
-    asr_service: Annotated[ASRService, Depends(get_asr_service)],  # 注入的 ASR 服务
-    audio: UploadFile = File(...),  # 上传的音频文件
+    asr_service: ASRService = Depends(get_asr_service),
+    audio: UploadFile = File(...),
 ):
     """将上传的音频转写为文本。"""
-    try:
-        audio_bytes = await audio.read()
-        if not audio_bytes:
-            raise HTTPException(status_code=400, detail="上传的音频为空")
+    audio_bytes = await _read_upload_bounded(audio)
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="上传的音频为空")
 
+    try:
         transcript = await asr_service.transcribe_audio(
             audio_bytes=audio_bytes,
             mime_type=audio.content_type or "application/octet-stream",
@@ -168,14 +192,11 @@ async def transcribe_audio(
     except ASRServiceError as exc:
         logger.warning(f"音频转写失败: {exc}")
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception as exc:
-        logger.error(f"音频转写接口异常: {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail="音频转写时发生未知错误") from exc
 
 
 @router.get("/api/workflow/info")
 async def workflow_info(
-    workflow: Annotated[MedicalCopilotWorkflow, Depends(get_workflow)],
+    workflow: MedicalCopilotWorkflow = Depends(get_workflow),
 ):
     """
     获取工作流信息
@@ -195,22 +216,25 @@ async def workflow_info(
 
 
 @router.post("/api/rag/upload", response_model=RAGUploadResponse)
-async def upload_rag_document(file: UploadFile = File(...)):
+async def upload_rag_document(
+    file: UploadFile = File(...),
+    rag_service: RAGService = Depends(get_rag_service),
+):
     """
     上传单个文档并索引到 RAG 向量存储。
 
     使用线程池执行同步的索引操作，避免阻塞事件循环。
     """
+    file_bytes = await _read_upload_bounded(file)
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="上传的文件为空")
+
+    collection_name = LEGACY_DEFAULT_SCOPE
+
     try:
-        file_bytes = await file.read()
-        if not file_bytes:
-            raise HTTPException(status_code=400, detail="上传的文件为空")
-
-        collection_name = LEGACY_DEFAULT_SCOPE
-
         # 在线程池中执行同步的索引操作
         result = await run_in_threadpool(
-            get_rag_service().upload_and_index,
+            rag_service.upload_and_index,
             file_bytes=file_bytes,
             filename=file.filename or "document",
             collection_name=collection_name,
@@ -242,6 +266,7 @@ async def upload_rag_document_versioned(
     dedup_mode: DedupMode = Query(
         DedupMode.SKIP, description="去重模式: skip, new_version, replace"
     ),
+    versioned_rag_service: VersionedTenantRAGService = Depends(get_versioned_rag_service),
 ):
     """
     上传单个文档并索引到版本化多租户 RAG 向量存储。
@@ -249,14 +274,14 @@ async def upload_rag_document_versioned(
     使用线程池执行同步的索引操作，避免阻塞事件循环。
     支持租户隔离和文档版本控制。
     """
-    try:
-        file_bytes = await file.read()
-        if not file_bytes:
-            raise HTTPException(status_code=400, detail="上传的文件为空")
+    file_bytes = await _read_upload_bounded(file)
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="上传的文件为空")
 
+    try:
         # 在线程池中执行同步的索引操作
         result = await run_in_threadpool(
-            get_versioned_rag_service().upload_and_index,
+            versioned_rag_service.upload_and_index,
             file_bytes=file_bytes,
             filename=file.filename or "document",
             tenant_id=x_tenant_id,

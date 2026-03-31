@@ -6,7 +6,7 @@ LangGraph主工作流编排
 """
 
 from langgraph.graph import StateGraph, END
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 from loguru import logger
 import uuid
 from datetime import datetime
@@ -15,8 +15,10 @@ from src.graph.state import GraphState
 from src.agents.dialogue_agent import DialogueAgent
 from src.agents.generation_agent import GenerationAgent
 from src.agents.qa_agent import QAAgent
+from src.agents.revision_agent import RevisionAgent
 from src.config import get_settings
-from src.retrieval.factory import create_retrieval_strategy, get_retrieval_mode
+from src.models.function_schemas import MedicalInfoExtraction
+from src.retrieval.factory import create_retrieval_strategy
 
 settings = get_settings()
 
@@ -66,6 +68,7 @@ class MedicalCopilotWorkflow:
 
         self.generation_agent = GenerationAgent()
         self.qa_agent = QAAgent()
+        self.revision_agent = RevisionAgent()
 
         # 构建工作流图
         self.graph = self._build_graph()
@@ -117,13 +120,8 @@ class MedicalCopilotWorkflow:
         """节点2: 检索临床指南"""
         logger.info("=== Agent 2: 知识检索 ===")
 
-        extracted_info = state.get("extracted_info", {})
-        if hasattr(extracted_info, "symptoms"):
-            symptoms = extracted_info.symptoms or []
-        elif isinstance(extracted_info, dict):
-            symptoms = extracted_info.get("symptoms", [])
-        else:
-            symptoms = []
+        extracted_info = state["extracted_info"]
+        symptoms = extracted_info.symptoms or []
 
         if symptoms:
             guidelines = await self.retrieval_agent.retrieve_by_symptoms(symptoms)
@@ -139,13 +137,13 @@ class MedicalCopilotWorkflow:
         logger.info("=== Agent 3: 病历生成 ===")
 
         patient_info_raw = state.get("patient_info", {})
-        medical_info = state.get("extracted_info", {})
+        medical_info = state["extracted_info"]
         guidelines = state.get("retrieved_guidelines", [])
 
         draft_emr = await self.generation_agent.generate(
             patient_info_raw,
             medical_info,
-            guidelines,  # type: ignore
+            guidelines,
         )
 
         state["draft_emr"] = draft_emr
@@ -157,48 +155,64 @@ class MedicalCopilotWorkflow:
         logger.info("=== Agent 4: 质控检查 ===")
 
         draft_emr = state.get("draft_emr")
-        medical_info = state.get("extracted_info", {})
+        medical_info = state["extracted_info"]
 
         if draft_emr is None:
             raise ValueError("draft_emr 为空，无法进行质控检查")
 
-        qa_report = await self.qa_agent.check(draft_emr, medical_info)  # type: ignore
+        qa_report = await self.qa_agent.check(draft_emr, medical_info)
 
         state["qa_report"] = qa_report
         state["final_emr"] = draft_emr  # 默认使用草稿作为最终版本
 
         # 根据质控结果决定是否需要修改
-        if hasattr(qa_report, "is_complete"):
-            state["needs_revision"] = not bool(qa_report.is_complete)
-        elif isinstance(qa_report, dict):
-            state["needs_revision"] = not bool(qa_report.get("is_complete", True))
-        else:
-            state["needs_revision"] = False
+        state["needs_revision"] = not qa_report.is_complete
 
         state["iteration_count"] = state.get("iteration_count", 0) + 1
 
         return state
 
     async def _revise_emr_node(self, state: GraphState) -> GraphState:
-        """节点5: 修改病历（可选）"""
+        """节点5: 修改病历（根据质控问题调用 RevisionAgent）"""
         logger.info("=== Agent 5: 病历修改 ===")
 
-        # 获取质控问题
         qa_report = state.get("qa_report")
-        if hasattr(qa_report, "issues"):
-            issues = qa_report.issues or []
-        elif isinstance(qa_report, dict):
-            issues = qa_report.get("issues", [])
-        else:
-            issues = []
+        draft_emr = state.get("draft_emr")
+        medical_info = state["extracted_info"]
 
-        # 根据质控建议修改病历
-        # 这里可以调用LLM根据qa_report进行修改
-        # 简化版：直接标记为完成
-        logger.info(f"检测到 {len(issues)} 个质控问题")
+        if qa_report is None:
+            logger.warning("qa_report 为空，跳过修改")
+            state["needs_revision"] = False
+            return state
 
-        # 在完整实现中，这里会调用修改Agent
-        # 目前简化为通过
+        issues = qa_report.issues or []
+        if not issues:
+            logger.info("无质控问题，跳过修改")
+            state["needs_revision"] = False
+            return state
+
+        logger.info(f"检测到 {len(issues)} 个质控问题，开始修改病历")
+
+        if draft_emr is None:
+            logger.warning("draft_emr 为空，跳过修改")
+            state["needs_revision"] = False
+            return state
+
+        try:
+            revised_emr = await self.revision_agent.revise(
+                original_emr=draft_emr,
+                qa_report=qa_report,
+                medical_info=medical_info,
+            )
+            state["draft_emr"] = revised_emr
+            state["final_emr"] = revised_emr
+            logger.info("[OK] 病历修改完成")
+        except Exception as e:
+            logger.error(f"病历修改失败: {e}", exc_info=True)
+            # 保留当前版本，安全退出修订循环
+            state["final_emr"] = draft_emr
+
+        # 无论成功或失败，结束修订循环
         state["needs_revision"] = False
 
         return state
@@ -232,16 +246,8 @@ class MedicalCopilotWorkflow:
         # 初始化状态
         initial_state: GraphState = {
             "conversation": inputs.get("conversation", []),
-            "patient_info": inputs.get("patient_info", {}),  # type: ignore
-            "extracted_info": {  # type: ignore
-                "symptoms": [],
-                "duration": None,
-                "severity": None,
-                "medications": [],
-                "allergies": [],
-                "past_history": [],
-                "family_history": [],
-            },
+            "patient_info": inputs.get("patient_info", {}),
+            "extracted_info": MedicalInfoExtraction(),
             "retrieved_guidelines": [],
             "draft_emr": None,
             "final_emr": None,
@@ -255,60 +261,30 @@ class MedicalCopilotWorkflow:
 
         logger.info(f"开始处理会话: {initial_state['session_id']}")
 
-        try:
-            # 运行工作流
-            final_state = await self.graph.ainvoke(initial_state)  # type: ignore
+        # Let unexpected exceptions propagate — the global exception handler
+        # in main.py will log them and return a sanitized response.
+        final_state = await self.graph.ainvoke(initial_state)  # type: ignore
 
-            # 提取结果（统一转换为可序列化字典）
-            extracted_info = final_state["extracted_info"]
-            final_emr = final_state["final_emr"]
-            qa_report = final_state["qa_report"]
+        # 提取结果（统一转换为可序列化字典）
+        extracted_info = final_state["extracted_info"].model_dump(mode="json")
+        final_emr = final_state["final_emr"]
+        qa_report = final_state["qa_report"]
 
-            if hasattr(extracted_info, "model_dump"):
-                extracted_info = extracted_info.model_dump()
-            if hasattr(final_emr, "model_dump"):
-                final_emr = final_emr.model_dump()
-            if hasattr(qa_report, "model_dump"):
-                qa_report = qa_report.model_dump()
+        if final_emr is not None:
+            final_emr = final_emr.model_dump(mode="json")
+        if qa_report is not None:
+            qa_report = qa_report.model_dump(mode="json")
 
-            result = {
-                "session_id": final_state["session_id"],
-                "timestamp": final_state["timestamp"],
-                "patient_info": final_state["patient_info"],
-                "extracted_info": extracted_info,
-                "final_emr": final_emr,
-                "qa_report": qa_report,
-                "iteration_count": final_state["iteration_count"],
-                "error_message": final_state["error_message"],
-            }
-
-            logger.info("工作流执行完成")
-            return result
-
-        except Exception as e:
-            logger.error(f"工作流执行失败: {str(e)}")
-            return {
-                "error_message": f"工作流执行失败: {str(e)}",
-                "session_id": initial_state["session_id"],
-            }
-
-
-# 测试代码
-if __name__ == "__main__":
-    import asyncio
-
-    async def test():
-        workflow = MedicalCopilotWorkflow()
-
-        test_input = {
-            "conversation": [
-                {"role": "doctor", "content": "你好，今天有什么不舒服？"},
-                {"role": "patient", "content": "我咳嗽已经一周了，还有点发热"},
-            ],
-            "patient_info": {"age": 35, "gender": "男"},
+        result = {
+            "session_id": final_state["session_id"],
+            "timestamp": final_state["timestamp"],
+            "patient_info": final_state["patient_info"],
+            "extracted_info": extracted_info,
+            "final_emr": final_emr,
+            "qa_report": qa_report,
+            "iteration_count": final_state["iteration_count"],
+            "error_message": final_state["error_message"],
         }
 
-        result = await workflow.run(test_input)
-        print(result)
-
-    asyncio.run(test())
+        logger.info("工作流执行完成")
+        return result

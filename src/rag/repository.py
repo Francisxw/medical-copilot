@@ -5,7 +5,7 @@
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Protocol, Any
 
 
@@ -189,6 +189,8 @@ class InMemoryDocumentRepository:
         ] = {}  # (tenant_id, kb_id, content_hash) -> version_id
         # 辅助索引：文档ID到版本ID列表
         self._document_versions_index: Dict[str, List[str]] = {}  # document_id -> [version_id, ...]
+        # 辅助索引：文档ID到最新版本ID
+        self._latest_version_index: Dict[str, str] = {}
 
     def get_document(self, document_id: str) -> Optional[DocumentRecord]:
         """获取文档记录，不存在则返回None"""
@@ -221,7 +223,7 @@ class InMemoryDocumentRepository:
             return self._documents[existing_doc_id]
 
         document_id = str(uuid.uuid4())
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         document = DocumentRecord(
             document_id=document_id,
             tenant_id=tenant_id,
@@ -246,15 +248,22 @@ class InMemoryDocumentRepository:
 
     def get_latest_version(self, document_id: str) -> Optional[DocumentVersionRecord]:
         """获取文档的最新版本（无论是否活动）"""
+        latest_version_id = self._latest_version_index.get(document_id)
+        if latest_version_id is not None:
+            latest_version = self._versions.get(latest_version_id)
+            if latest_version is not None:
+                return latest_version
+
         version_ids = self._document_versions_index.get(document_id, [])
         if not version_ids:
             return None
-        # 假设版本按创建时间排序，但为了简单，我们遍历所有版本找到最大版本号
-        latest_version = None
-        for version_id in version_ids:
-            version = self._versions.get(version_id)
-            if version and (latest_version is None or version.version > latest_version.version):
-                latest_version = version
+
+        versions = [self._versions[vid] for vid in version_ids if vid in self._versions]
+        if not versions:
+            return None
+
+        latest_version = max(versions, key=lambda v: v.version)
+        self._latest_version_index[document_id] = latest_version.version_id
         return latest_version
 
     def find_version_by_hash(
@@ -269,12 +278,18 @@ class InMemoryDocumentRepository:
 
     def create_version(self, version: DocumentVersionRecord) -> None:
         """创建新版本"""
+        latest_before = self.get_latest_version(version.document_id)
+
         # 存储版本记录
         self._versions[version.version_id] = version
         # 更新文档版本索引
         if version.document_id not in self._document_versions_index:
             self._document_versions_index[version.document_id] = []
         self._document_versions_index[version.document_id].append(version.version_id)
+        if latest_before is None or version.version >= latest_before.version:
+            self._latest_version_index[version.document_id] = version.version_id
+        elif version.document_id not in self._latest_version_index:
+            self._latest_version_index[version.document_id] = latest_before.version_id
         # 更新内容哈希索引
         key = (version.tenant_id, version.kb_id, version.content_hash)
         self._content_hash_index[key] = version.version_id

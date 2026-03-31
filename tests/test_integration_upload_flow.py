@@ -16,7 +16,7 @@ Test coverage:
 
 import pytest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 from fastapi.testclient import TestClient
 
 from src.main import app
@@ -71,11 +71,14 @@ def legacy_service(versioned_service):
 @pytest.fixture
 def client_with_real_services(legacy_service, versioned_service):
     """Provide a TestClient with real service instances injected."""
-    with (
-        patch("src.api.routes.get_rag_service", return_value=legacy_service),
-        patch("src.api.routes.get_versioned_rag_service", return_value=versioned_service),
-    ):
-        yield TestClient(app)
+    app.dependency_overrides[get_rag_service] = lambda: legacy_service
+    app.dependency_overrides[get_versioned_rag_service] = lambda: versioned_service
+    try:
+        with TestClient(app) as client:
+            yield client
+    finally:
+        app.dependency_overrides.pop(get_rag_service, None)
+        app.dependency_overrides.pop(get_versioned_rag_service, None)
 
 
 class TestLegacyUploadIntegration:
