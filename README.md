@@ -202,6 +202,33 @@ start_vector.bat
 - API文档：http://localhost:8888/docs
 - 演示界面：http://localhost:8501
 
+## 📸 界面展示
+
+### 主界面
+
+系统采用深蓝色医疗主题UI设计，包含三栏式卡片布局：
+
+**主界面（初始状态）**
+
+![主界面](docs/screenshots/frontend_initial.png)
+
+**载入示例对话**
+
+![对话记录](docs/screenshots/frontend_conversation.png)
+
+### 功能区域
+
+| 区域 | 功能 |
+|------|------|
+| 👤 患者档案 | 患者基本信息（年龄、性别、科室） |
+| 💬 医患对话 | 微信风格对话气泡，支持语音录入 |
+| 🧠 AI临床决策 | 实时分析与辅助诊断建议 |
+| 🛡️ 质控检查 | 自动评分与缺项检测 |
+| 📝 SOAP病历 | 结构化病历展示与导出 |
+| 📄 RAG上传 | 文档上传与知识库构建 |
+
+---
+
 ## 💡 使用示例
 
 ### API调用
@@ -407,13 +434,24 @@ pytest --cov=src tests/
 ```python
 class GraphState(TypedDict):
     conversation: List[Dict]
-    extracted_info: Dict
+    patient_info: Dict
+    extracted_info: MedicalInfoExtraction   # Pydantic模型
     retrieved_guidelines: List[Dict]
-    draft_emr: Dict
-    final_emr: Dict
-    qa_report: Dict
+    draft_emr: Optional[SOAPNote]        # Pydantic模型
+    final_emr: Optional[SOAPNote]        # Pydantic模型
+    qa_report: Optional[QAReport]        # Pydantic模型
     iteration_count: int
 ```
+
+### 病历修订闭环
+
+当质控检查发现问题后，系统自动调用 **RevisionAgent** 对草稿病历进行修订：
+
+```
+Draft → QA Check → (Issues Found?) → Revision → QA Check → ... → Final
+```
+
+最多迭代 3 次，确保病历质量达标。
 
 ## 🛠️ 开发路线图
 
@@ -422,9 +460,11 @@ class GraphState(TypedDict):
 - [x] RAG向量检索
 - [x] FastAPI接口
 - [x] Streamlit演示UI
+- [x] 病历修改反馈闭环（RevisionAgent）
+- [x] 统一类型系统（Pydantic模型 + Enum）
+- [x] 完整测试覆盖（165 tests）
 - [ ] 支持更多病历类型（手术记录、出院小结）
 - [ ] 多轮对话状态优化
-- [ ] 病历修改反馈循环
 - [ ] 更多质控规则
 
 ## 💰 成本说明
